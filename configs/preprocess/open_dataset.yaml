@@ -1,0 +1,100 @@
+extends:
+  - ../train/stage0_data_tokenizer.yaml
+
+run:
+  name: preprocess_design_open_datasets
+  output_dir: runs/preprocess_design_open_datasets
+  seed: 42
+
+data:
+  manifest_path: runs/preprocess_design_open_datasets/manifest.jsonl
+
+preprocess:
+  writer:
+    output_dir: runs/preprocess_design_open_datasets
+    output_format: jsonl
+    shard_prefix: clean
+    shard_max_bytes: 134217728
+  sources:
+    - name: cci3_hq
+      type: hf_dataset
+      domain: zh
+      language: zh
+      license: see_dataset_card
+      hf_name: BAAI/CCI3-HQ
+      hf_split: train
+      hf_streaming: true
+      text_field: text
+      id_field: id
+      metadata_fields: ["url", "title", "source", "quality_score"]
+      weight: 0.225
+    - name: chinese_webtext_2
+      type: hf_dataset
+      domain: zh
+      language: zh
+      license: see_dataset_card
+      hf_name: CASIA-LM/ChineseWebText2.0
+      hf_split: train
+      hf_streaming: true
+      text_field: text
+      id_field: id
+      metadata_fields: ["url", "title", "domain", "quality_score", "score"]
+      weight: 0.175
+    - name: fineweb_edu
+      type: hf_dataset
+      domain: en
+      language: en
+      license: see_dataset_card
+      hf_name: HuggingFaceFW/fineweb-edu
+      hf_config: CC-MAIN-2024-10
+      hf_split: train
+      hf_streaming: true
+      text_field: text
+      id_field: id
+      metadata_fields: ["url", "dump", "score", "language"]
+      weight: 0.125
+    - name: dolma
+      type: hf_dataset
+      domain: en
+      language: en
+      license: see_dataset_card
+      hf_name: allenai/dolma
+      hf_split: train
+      hf_streaming: true
+      text_field: text
+      id_field: id
+      metadata_fields: ["source", "url", "added"]
+      weight: 0.075
+    - name: openwebmath
+      type: hf_dataset
+      domain: math
+      language: en
+      license: see_dataset_card
+      hf_name: open-web-math/open-web-math
+      hf_split: train
+      hf_streaming: true
+      text_field: text
+      id_field: id
+      metadata_fields: ["url", "date", "metadata"]
+      weight: 0.05
+    - name: proof_pile_2
+      type: hf_dataset
+      domain: math
+      language: en
+      license: see_dataset_card
+      hf_name: lehduong/proof-pile-2
+      hf_split: train
+      hf_streaming: true
+      text_field: text
+      id_field: id
+      metadata_fields: ["source", "url", "arxiv_id"]
+      weight: 0.03
+  cleaning: {}
+  dedup:
+    exact: true
+    simhash: true
+    state_dir: runs/preprocess_design_open_datasets/dedup_state
+    load_existing_state: false
+  quality:
+    scorer: heuristic
+    min_score: 0.45

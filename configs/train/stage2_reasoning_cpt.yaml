@@ -1,0 +1,65 @@
+extends:
+  - ../data/mixture_50b.yaml
+  - ../tokenizer/hf_byte_bpe_150k.yaml
+  - ../model/qwen_like_700m.yaml
+
+run:
+  name: stage2_reasoning_cpt
+  output_dir: runs/stage2_reasoning_cpt
+  seed: 42
+
+data:
+  manifest_path: runs/stream_preprocess_parquet_zstd/manifest.jsonl
+  validate_hashes: false
+  reader:
+    parquet_batch_size: 16384
+  mixer:
+    temperature: 0.8
+    seed: 42
+  packing:
+    seq_len: 4096
+    batch_size: 1
+    async_tokenization: true
+    producer_workers: 16
+    queue_max_batches: 64
+
+model: {}
+
+trainer:
+  micro_batch_size: 2
+  global_batch_size: 64
+  max_tokens: 5_000_000_000
+  max_steps: null
+  checkpoint_interval_steps: 1000
+  optimizer: {type: adamw, lr: 2.0e-4, betas: [0.9, 0.95], weight_decay: 0.1}
+  scheduler: {type: cosine, warmup_tokens: 100_000_000, min_lr_ratio: 0.05}
+  precision: bf16
+  grad_clip: 1.0
+
+checkpoint:
+  save_interval_minutes: 30
+  milestone_interval_tokens: 500_000_000
+  keep_latest: 3
+
+distributed:
+  backend: fsdp
+  activation_checkpointing: true
+  fsdp_sharding_strategy: full_shard
+  fsdp_mixed_precision: true
+  profile_memory: true
+  profile_interval_steps: 10
+
+observability:
+  metrics_jsonl: true
+  events_jsonl: true
+  data_metrics_jsonl: true
+  heartbeat: true
+  console_interval_steps: 10
+  heartbeat_interval_seconds: 60
+  data_metrics_interval_seconds: 30
+  tensorboard: false
+  wandb: false
+  collect_histograms: false
+  collect_tokenizer_stats: false
+  loss_spike_window: 10
+  loss_spike_sigma: 5.0

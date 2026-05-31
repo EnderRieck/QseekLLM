@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llmtrain"
+version = "0.1.0"
+description = "Foundation data and tokenizer pipeline for LLM pretraining."
+requires-python = ">=3.10"
+dependencies = [
+  "pydantic>=2",
+  "PyYAML>=6",
+  "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+parquet = ["pyarrow>=12"]
+tokenizer = ["sentencepiece>=0.1.99"]
+dev = ["pytest>=8"]
+preprocess = ["datasets", "huggingface_hub", "hf_transfer", "pyarrow", "lxml", "requests", "tqdm", "zstandard", "boto3", "smart_open[s3]"]
+eval = ["lm-eval>=0.4.8", "datasets", "accelerate"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

@@ -1,0 +1,35 @@
+run:
+  name: stage1_general_700m
+  output_dir: runs/eval
+  seed: 42
+
+model:
+  train_config: configs/train/stage1_general_700m.yaml
+  checkpoint: latest
+
+runtime:
+  device: auto
+  dtype: auto
+  compile_model: false
+  allow_tokenizer_fallback: false
+
+datasets:
+  root_dir: eval/datasets
+  wplc_prepared_path: eval/datasets/chinese_wplc/dev.jsonl
+  offline: true
+
+harness:
+  include_path: eval/tasks
+  batch_size: 4
+  max_batch_size: null
+  limit: null
+  num_fewshot: 0
+  bootstrap_iters: 0
+  log_samples: true
+  cache_requests: true
+  use_cache: null
+  verbosity: INFO
+
+tasks:
+  - chinese_wplc
+  - lambada_openai

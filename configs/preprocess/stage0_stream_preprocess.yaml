@@ -1,0 +1,219 @@
+extends:
+  - ../train/stage0_data_tokenizer.yaml
+
+run:
+  name: stream_preprocess
+  output_dir: /mnt/DataFlow/lz/proj/agentgroup/ziyi/llmTrain/runs/stream_preprocess
+  seed: 42
+
+data:
+  manifest_path: /mnt/DataFlow/lz/proj/agentgroup/ziyi/llmTrain/runs/stream_preprocess/manifest.jsonl
+
+preprocess:
+  checkpoint_interval_records: 1000
+  num_workers: 64
+  worker_chunk_files: 1
+  keep_candidates: false
+  writer:
+    output_dir: runs/stream_preprocess
+    output_format: jsonl
+    shard_prefix: clean
+    shard_max_bytes: 134217728
+    rejected_path: runs/stream_preprocess/rejected.jsonl
+  cleaning:
+    min_chars: 80
+    max_chars: 200000
+    normalize_unicode: true
+    normalize_whitespace: true
+    remove_boilerplate: true
+    min_alpha_or_cjk_ratio: 0.10
+    max_repeated_line_ratio: 0.45
+    max_control_char_ratio: 0.03
+  dedup:
+    exact: true
+    simhash: false
+    simhash_bits: 64
+    simhash_threshold: 3
+    index_workers: 64
+    exact_shards: 256
+    simhash_shards: 256
+    simhash_max_group_size: 2048
+    state_dir: runs/stream_preprocess/dedup_state
+    persist_state: true
+    load_existing_state: false
+  quality:
+    scorer: heuristic
+    min_score: 0.45
+  sources:
+    # Chinese general: design doc candidates.
+    - name: cci3_hq
+      type: jsonl
+      domain: zh
+      language: zh
+      license: see_dataset_card
+      paths:
+        - /mnt/paper2any/ziyi/llmTrain/datasets/cci3_hq/**/*.jsonl
+        - /mnt/paper2any/ziyi/llmTrain/datasets/cci3_hq/*.jsonl
+        - /mnt/paper2any/ziyi/llmTrain/datasets/cci3_hq/**/*.jsonl.gz
+        - /mnt/paper2any/ziyi/llmTrain/datasets/cci3_hq/*.jsonl.gz
+        - /mnt/paper2any/ziyi/llmTrain/datasets/cci3_hq/**/*.json.gz
+        - /mnt/paper2any/ziyi/llmTrain/datasets/cci3_hq/*.json.gz
+      text_field: text
+      id_field: id
+      metadata_fields: ["url", "title", "source", "quality_score"]
+      weight: 0.10
+    - name: fineweb_edu_chinese_v21
+      type: remote_parquet
+      domain: zh
+      language: zh
+      license: see_dataset_card
+      hf_repo_id: opencsg/Fineweb-Edu-Chinese-V2.1
+      hf_revision: main
+      hf_include_patterns:
+        - "3_4/*.parquet"
+        - "4_5/*.parquet"
+      text_field: text
+      id_field: null
+      metadata_fields: ["score", "source"]
+      exclude_metadata_values:
+        source: ["CCI3", "ChineseWebText"]
+      weight: 0.25
+    - name: chinese_webtext_2
+      type: jsonl
+      domain: zh
+      language: zh
+      license: see_dataset_card
+      paths:
+        - /mnt/paper2any/ziyi/llmTrain/datasets/chinese_webtext_2/ChineseWebText2.0/*.jsonl.gz
+      text_field: text
+      id_field: id
+      metadata_fields: ["url", "title", "domain", "quality_score", "score"]
+      weight: 0.025
+
+    # English general.
+    - name: fineweb_edu
+      type: parquet
+      domain: en
+      language: en
+      license: see_dataset_card
+      paths:
+        - /mnt/paper2any/ziyi/llmTrain/datasets/fineweb_edu/data/CC-MAIN-2024-10/*.parquet
+      text_field: text
+      id_field: id
+      metadata_fields: ["url", "dump", "score", "language", "language_score", "token_count", "file_path"]
+      weight: 0.125
+    - name: dolma
+      type: jsonl
+      domain: en
+      language: en
+      license: see_dataset_card
+      paths:
+        - /mnt/paper2any/ziyi/llmTrain/datasets/dolma/files/**/*.jsonl
+        - /mnt/paper2any/ziyi/llmTrain/datasets/dolma/files/**/*.jsonl.gz
+        - /mnt/paper2any/ziyi/llmTrain/datasets/dolma/files/**/*.json.gz
+      text_field: text
+      id_field: id
+      metadata_fields: ["source", "url", "added", "created", "metadata"]
+      weight: 0.075
+
+    # The Stack v1 is a gated HF dataset. Run tools/download_datasets.py with
+    # --source the_stack_v1 after accepting the dataset terms and
+    # setting HF_TOKEN. It downloads parquet shards under llmTrain/datasets.
+    - name: the_stack_v1
+      enabled: false
+      type: remote_parquet
+      domain: code
+      language: multi
+      license: see_dataset_card_and_original_repo_license
+      hf_repo_id: bigcode/the-stack
+      hf_revision: main
+      hf_include_patterns:
+        - data/**/*.parquet
+      text_field: content
+      id_field: null
+      metadata_fields: ["hexsha", "size", "ext", "lang", "max_stars_repo_path", "max_stars_repo_name", "max_stars_repo_head_hexsha", "max_stars_repo_licenses", "max_stars_count", "avg_line_length", "max_line_length", "alphanum_fraction"]
+      weight: 0.09
+    - name: codenet
+      type: parquet
+      domain: code
+      language: multi
+      license: see_dataset_card
+      paths:
+        - /mnt/paper2any/ziyi/llmTrain/datasets/codenet/data/train-*.parquet
+      text_field: Text
+      id_field: null
+      metadata_fields: ["Source", "Date", "Token_count"]
+      weight: 0.03
+
+    # Math and reasoning.
+    - name: openwebmath
+      type: parquet
+      domain: math
+      language: en
+      license: see_dataset_card
+      paths:
+        - /mnt/paper2any/ziyi/llmTrain/datasets/openwebmath/**/*.parquet
+        - /mnt/paper2any/ziyi/llmTrain/datasets/openwebmath/*.parquet
+      text_field: text
+      id_field: id
+      metadata_fields: ["url", "date", "metadata"]
+      weight: 0.05
+    - name: proof_pile_2
+      type: parquet
+      domain: math
+      language: en
+      license: see_dataset_card
+      paths:
+        - /mnt/paper2any/ziyi/llmTrain/datasets/proof_pile_2/*/train-*.parquet
+      text_field: text
+      id_field: id
+      metadata_fields: ["source", "url", "arxiv_id"]
+      weight: 0.03
+    - name: deepseekmath_style_local
+      type: jsonl
+      domain: math
+      language: multi
+      license: derived_or_internal
+      paths:
+        - /mnt/paper2any/datasets/math_extracted/*.jsonl
+      text_field: text
+      id_field: id
+      metadata_fields: ["url", "source", "classifier_score"]
+      weight: 0.02
+
+    # Self-built papers. MinerU integration should emit unified JSONL here later.
+    - name: papers_mineru_unified
+      type: jsonl
+      domain: paper
+      language: multi
+      license: internal_or_source_license
+      paths:
+        - /mnt/paper2any/datasets/papers_mineru/unified/*.jsonl
+      text_field: text
+      id_field: id
+      metadata_fields: ["title", "year", "arxiv_id", "doi", "license", "quality_score"]
+      weight: 0.13
+
+    # Self-built encyclopedia/wiki.
+    - name: zhwiki
+      type: jsonl
+      domain: wiki
+      language: zh
+      license: CC-BY-SA
+      paths:
+        - /mnt/paper2any/ziyi/llmTrain/datasets/wiki_shards/zhwiki/*.jsonl
+      text_field: text
+      id_field: id
+      metadata_fields: ["title", "page_id", "source", "language", "license"]
+      weight: 0.04
+    - name: enwiki
+      type: jsonl
+      domain: wiki
+      language: en
+      license: CC-BY-SA
+      paths:
+        - /mnt/paper2any/ziyi/llmTrain/datasets/wiki_shards/enwiki/*.jsonl
+      text_field: text
+      id_field: id
+      metadata_fields: ["title", "page_id", "source", "language", "license"]
+      weight: 0.03

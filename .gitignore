@@ -1,0 +1,97 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Training outputs
+runs/
+logs/
+checkpoints/
+*.log
+*.jsonl
+*.tsv
+*.png
+*.jpg
+*.jpeg
+
+# Data
+data/
+datasets/
+*.parquet
+*.arrow
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+.cache/
+.pytest_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Model files (too large for git)
+models/
+*.model
+*.bin
+*.gguf
+
+# Config overrides (may contain sensitive paths)
+configs/**/*local*.yaml
+configs/**/*private*.yaml
+
+# Claude Code
+.claude/
+
+# System
+.nfs*
+
+# Node.js (if any)
+node_modules/
+
+# HuggingFace cache
+hf_cache/
+
+# Datasets (too large)
+datasets/
+
+# Environment variables (contains local paths)
+.env

@@ -1,0 +1,59 @@
+extends:
+  - ../train/stage0_data_tokenizer.yaml
+
+run:
+  name: stream_preprocess_stack_v1
+  output_dir: /mnt/DataFlow/lz/proj/agentgroup/ziyi/llmTrain/runs/stream_preprocess_stack_v1
+  seed: 42
+
+data:
+  manifest_path: /mnt/DataFlow/lz/proj/agentgroup/ziyi/llmTrain/runs/stream_preprocess_stack_v1/manifest.jsonl
+
+preprocess:
+  checkpoint_interval_records: 1000
+  num_workers: 64
+  worker_chunk_files: 1
+  keep_candidates: false
+  cleanup_dedup_work: true
+  writer:
+    output_dir: /mnt/DataFlow/lz/proj/agentgroup/ziyi/llmTrain/runs/stream_preprocess_stack_v1
+    output_format: jsonl
+    shard_prefix: clean
+    shard_max_bytes: 134217728
+    rejected_path: /mnt/DataFlow/lz/proj/agentgroup/ziyi/llmTrain/runs/stream_preprocess_stack_v1/rejected.jsonl
+  cleaning:
+    min_chars: 80
+    max_chars: 200000
+    normalize_unicode: true
+    normalize_whitespace: true
+    remove_boilerplate: true
+    min_alpha_or_cjk_ratio: 0.10
+    max_repeated_line_ratio: 0.7
+    max_control_char_ratio: 0.03
+  dedup:
+    exact: true
+    simhash: false
+    simhash_bits: 64
+    simhash_threshold: 3
+    index_workers: 64
+    exact_shards: 256
+    simhash_shards: 256
+    simhash_max_group_size: 2048
+    state_dir: /mnt/DataFlow/lz/proj/agentgroup/ziyi/llmTrain/runs/stream_preprocess_stack_v1/dedup_state
+    persist_state: true
+    load_existing_state: false
+  quality:
+    scorer: heuristic
+    min_score: 0.45
+  sources:
+    - name: the_stack_v1
+      type: parquet
+      domain: code
+      language: multi
+      license: see_dataset_card_and_original_repo_license
+      paths:
+        - /mnt/DataFlow/lz/proj/agentgroup/ziyi/llmTrain/datasets/the_stack_v1/data/**/*.parquet
+      text_field: content
+      id_field: null
+      metadata_fields: ["hexsha", "size", "ext", "lang", "max_stars_repo_path", "max_stars_repo_name", "max_stars_repo_head_hexsha", "max_stars_repo_licenses", "max_stars_count", "avg_line_length", "max_line_length", "alphanum_fraction"]
+      weight: 1.0

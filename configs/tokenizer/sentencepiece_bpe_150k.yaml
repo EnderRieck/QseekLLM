@@ -1,0 +1,22 @@
+tokenizer:
+  algorithm: sentencepiece_bpe
+  vocab_size: 150000
+  model_prefix: llmtrain_spm_150k
+  model_path: runs/stage0_data_tokenizer/tokenizer/llmtrain_spm_150k.model
+  corpus_path: runs/stage0_data_tokenizer/tokenizer_corpus
+  output_dir: runs/stage0_data_tokenizer/tokenizer
+  character_coverage: 0.9995
+  byte_fallback: true
+  normalization_rule_name: identity
+  shuffle_input_sentence: true
+  train_num_threads: 64
+  special_tokens:
+    - "<unk>"
+    - "<s>"
+    - "</s>"
+    - "<pad>"
+    - "<|system|>"
+    - "<|user|>"
+    - "<|assistant|>"
+    - "<|tool|>"
+    - "<|endoftext|>"

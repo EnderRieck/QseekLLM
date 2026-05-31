@@ -1,0 +1,20 @@
+tokenizer:
+  algorithm: hf_byte_bpe
+  vocab_size: 150000
+  model_prefix: llmtrain_hf_byte_bpe_150k
+  model_path: runs/stage0_data_tokenizer_hf/tokenizer/llmtrain_hf_byte_bpe_150k.json
+  corpus_path: runs/stage0_data_tokenizer/tokenizer_corpus
+  output_dir: runs/stage0_data_tokenizer_hf/tokenizer
+  byte_fallback: true
+  train_num_threads: 64
+  train_log: true
+  special_tokens:
+    - "<unk>"
+    - "<s>"
+    - "</s>"
+    - "<pad>"
+    - "<|system|>"
+    - "<|user|>"
+    - "<|assistant|>"
+    - "<|tool|>"
+    - "<|endoftext|>"

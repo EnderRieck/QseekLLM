@@ -1,0 +1,114 @@
+extends:
+  - stage0_data_tokenizer.yaml
+
+run:
+  name: stage0_data_tokenizer_smoke
+  output_dir: runs/stage0_data_tokenizer_smoke
+  seed: 42
+
+data:
+  manifest_path: examples/data/manifest.jsonl
+  validate_hashes: true
+  sources:
+    - name: sample_zh
+      domain: zh
+      language: zh
+      weight: 0.35
+      target_ratio: 0.35
+      paths: ["examples/data/zh/sample.jsonl"]
+    - name: sample_en
+      domain: en
+      language: en
+      weight: 0.20
+      target_ratio: 0.20
+      paths: ["examples/data/en/sample.jsonl"]
+    - name: sample_code
+      domain: code
+      language: multi
+      weight: 0.15
+      target_ratio: 0.15
+      paths: ["examples/data/code/sample.jsonl"]
+    - name: sample_math
+      domain: math
+      language: multi
+      weight: 0.10
+      target_ratio: 0.10
+      paths: ["examples/data/math/sample.jsonl"]
+    - name: sample_paper
+      domain: paper
+      language: en
+      weight: 0.15
+      target_ratio: 0.15
+      paths: ["examples/data/paper/sample.jsonl"]
+    - name: sample_wiki
+      domain: wiki
+      language: zh
+      weight: 0.05
+      target_ratio: 0.05
+      paths: ["examples/data/wiki/sample.jsonl"]
+  packing:
+    seq_len: 32
+    batch_size: 2
+    async_tokenization: true
+    producer_workers: 2
+    queue_max_batches: 4
+  tokenizer_sampling:
+    byte_budget: 20000
+    output_dir: runs/stage0_data_tokenizer_smoke/tokenizer_corpus
+    output_shard_bytes: 4096
+    num_workers: 2
+    ratios:
+      zh: 0.35
+      en: 0.20
+      code: 0.15
+      math: 0.10
+      paper: 0.15
+      wiki: 0.05
+    seed: 42
+
+tokenizer:
+  algorithm: sentencepiece_bpe
+  vocab_size: 512
+  model_prefix: llmtrain_spm_sample
+  model_path: runs/stage0_data_tokenizer_smoke/tokenizer/llmtrain_spm_sample.model
+  corpus_path: runs/stage0_data_tokenizer_smoke/tokenizer_corpus
+  output_dir: runs/stage0_data_tokenizer_smoke/tokenizer
+  byte_fallback: true
+  train_num_threads: 2
+
+model:
+  vocab_size: 512
+
+trainer:
+  micro_batch_size: 2
+  global_batch_size: 2
+  max_tokens: 256
+  optimizer: {type: adamw, lr: 3.0e-4, betas: [0.9, 0.95], weight_decay: 0.1}
+  scheduler: {type: cosine, warmup_tokens: 64, min_lr_ratio: 0.1}
+  precision: bf16
+  grad_clip: 1.0
+
+checkpoint:
+  save_interval_minutes: 30
+  milestone_interval_tokens: 128
+  keep_latest: 3
+  schema_version: "1.0"
+
+distributed:
+  backend: none
+  activation_checkpointing: false
+
+observability:
+  metrics_jsonl: true
+  events_jsonl: true
+  data_metrics_jsonl: true
+  heartbeat: true
+  console_interval_steps: 10
+  heartbeat_interval_seconds: 60
+  data_metrics_interval_seconds: 30
+  tensorboard: false
+  wandb: false
+  collect_histograms: false
+  collect_tokenizer_stats: false
+  loss_spike_window: 10
+  loss_spike_sigma: 5.0

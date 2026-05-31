@@ -1,0 +1,21 @@
+runtime:
+  device: auto
+  dtype: auto
+  compile_model: false
+  allow_tokenizer_fallback: false
+
+generation:
+  max_new_tokens: 128
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 50
+  do_sample: true
+  repetition_penalty: 1.0
+  include_prompt: false
+  stop_on_eot: true
+  use_kv_cache: true
+
+batch:
+  prompt_field: prompt
+  output_field: completion
+  include_metadata: true

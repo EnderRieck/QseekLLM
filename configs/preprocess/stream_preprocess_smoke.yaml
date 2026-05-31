@@ -1,0 +1,167 @@
+extends:
+  - stage0_stream_preprocess.yaml
+
+run:
+  name: stream_preprocess_smoke
+  output_dir: runs/stream_preprocess_smoke
+
+data:
+  manifest_path: runs/stream_preprocess_smoke/manifest.jsonl
+
+preprocess:
+  checkpoint_interval_records: 100
+  writer:
+    output_dir: runs/stream_preprocess_smoke
+    output_format: jsonl
+    shard_prefix: smoke
+    shard_max_bytes: 16777216
+    rejected_path: runs/stream_preprocess_smoke/rejected.jsonl
+  dedup:
+    state_dir: runs/stream_preprocess_smoke/dedup_state
+    load_existing_state: false
+  sources:
+    - name: cci3_hq
+      type: hf_dataset
+      domain: zh
+      language: zh
+      license: see_dataset_card
+      hf_name: BAAI/CCI3-HQ
+      hf_split: train
+      hf_streaming: true
+      text_field: text
+      id_field: id
+      metadata_fields: ["url", "title", "source", "quality_score"]
+      weight: 0.225
+      limit: 1000
+    - name: chinese_webtext_2
+      type: remote_jsonl
+      domain: zh
+      language: zh
+      license: see_dataset_card
+      hf_repo_id: CASIA-LM/ChineseWebText2.0
+      hf_revision: main
+      hf_include_patterns:
+        - ChineseWebText2.0/*.jsonl.gz
+      text_field: text
+      id_field: id
+      metadata_fields: ["url", "title", "domain", "quality_score", "score"]
+      weight: 0.175
+      limit: 1000
+    - name: fineweb_edu
+      type: remote_parquet
+      domain: en
+      language: en
+      license: see_dataset_card
+      hf_repo_id: HuggingFaceFW/fineweb-edu
+      hf_revision: main
+      hf_include_patterns:
+        - data/CC-MAIN-2024-10/*.parquet
+      text_field: text
+      id_field: id
+      metadata_fields: ["url", "dump", "score", "language", "language_score", "token_count", "file_path"]
+      weight: 0.125
+      limit: 1000
+    - name: dolma
+      type: remote_jsonl
+      domain: en
+      language: en
+      license: see_dataset_card
+      url_list_url: https://huggingface.co/datasets/allenai/dolma/resolve/main/urls/v1_7.txt
+      text_field: text
+      id_field: id
+      metadata_fields: ["source", "url", "added", "created", "metadata"]
+      weight: 0.075
+      limit: 1000
+    - name: the_stack_v2_resolved
+      type: git
+      domain: code
+      language: multi
+      license: see_dataset_card
+      paths:
+        - /mnt/paper2any/datasets/the_stack_v2/resolved_repos
+      include_extensions: [".py", ".js", ".ts", ".tsx", ".java", ".go", ".rs", ".cpp", ".c", ".h", ".hpp", ".cs", ".php", ".rb", ".swift", ".kt", ".scala", ".sh", ".sql", ".md"]
+      exclude_dirs: [".git", "node_modules", "vendor", "dist", "build", "target", "__pycache__"]
+      max_file_bytes: 1000000
+      weight: 0.09
+      limit: 1000
+    - name: codenet
+      type: jsonl
+      domain: code
+      language: multi
+      license: see_dataset_card
+      paths:
+        - /mnt/paper2any/datasets/codenet/unified/*.jsonl
+      text_field: text
+      id_field: id
+      metadata_fields: ["problem_id", "submission_id", "language", "status"]
+      weight: 0.03
+      limit: 1000
+    - name: openwebmath
+      type: remote_parquet
+      domain: math
+      language: en
+      license: see_dataset_card
+      hf_repo_id: open-web-math/open-web-math
+      hf_revision: main
+      hf_include_patterns: ["**/*.parquet", "*.parquet"]
+      text_field: text
+      id_field: id
+      metadata_fields: ["url", "date", "metadata"]
+      weight: 0.05
+      limit: 1000
+    - name: proof_pile_2
+      type: remote_parquet
+      domain: math
+      language: en
+      license: see_dataset_card
+      hf_repo_id: lehduong/proof-pile-2
+      hf_revision: main
+      hf_include_patterns:
+        - "*/train-*.parquet"
+      text_field: text
+      id_field: id
+      metadata_fields: ["source", "url", "arxiv_id"]
+      weight: 0.03
+      limit: 1000
+    - name: deepseekmath_style_local
+      type: jsonl
+      domain: math
+      language: multi
+      license: derived_or_internal
+      paths:
+        - /mnt/paper2any/datasets/math_extracted/*.jsonl
+      text_field: text
+      id_field: id
+      metadata_fields: ["url", "source", "classifier_score"]
+      weight: 0.02
+      limit: 1000
+    - name: papers_mineru_unified
+      type: jsonl
+      domain: paper
+      language: multi
+      license: internal_or_source_license
+      paths:
+        - /mnt/paper2any/datasets/papers_mineru/unified/*.jsonl
+      text_field: text
+      id_field: id
+      metadata_fields: ["title", "year", "arxiv_id", "doi", "license", "quality_score"]
+      weight: 0.13
+      limit: 1000
+    - name: zhwiki_xml
+      type: wiki_xml
+      domain: wiki
+      language: zh
+      license: CC-BY-SA
+      paths:
+        - /mnt/paper2any/datasets/wiki/zhwiki-latest-pages-articles.xml
+      weight: 0.04
+      limit: 1000
+    - name: enwiki_xml
+      type: wiki_xml
+      domain: wiki
+      language: en
+      license: CC-BY-SA
+      paths:
+        - /mnt/paper2any/datasets/wiki/enwiki-latest-pages-articles.xml
+      weight: 0.03
+      limit: 1000

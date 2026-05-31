@@ -1,0 +1,18 @@
+extends:
+  - ../data/mixture_50b.yaml
+  - ../data/tokenizer_sample_200gb.yaml
+  - ../tokenizer/hf_byte_bpe_150k.yaml
+  - ../model/qwen_like_300m.yaml
+
+run:
+  name: stage0_data_tokenizer
+  output_dir: runs/stage0_data_tokenizer
+  seed: 42
+
+data:
+  manifest_path: runs/stream_preprocess_parquet_zstd/manifest.jsonl
+  validate_hashes: false
+
+trainer: {}
+
+checkpoint: {}

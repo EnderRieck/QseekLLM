@@ -1,0 +1,66 @@
+extends:
+  - ../data/mixture_50b.yaml
+  - ../tokenizer/hf_byte_bpe_150k.yaml
+  - ../model/qwen_like_1_7b.yaml
+
+run:
+  name: stage3_long_context_1_7b
+  output_dir: runs/stage3_long_context
+  seed: 42
+
+data:
+  manifest_path: runs/stream_preprocess_parquet_zstd/manifest.jsonl
+  validate_hashes: false
+  reader:
+    parquet_batch_size: 8192
+  mixer:
+    temperature: 0.9
+    seed: 42
+  packing:
+    seq_len: 8192
+    batch_size: 1
+    async_tokenization: true
+    producer_workers: 16
+    queue_max_batches: 32
+
+model:
+  max_position_embeddings: 8192
+
+trainer:
+  micro_batch_size: 1
+  global_batch_size: 512
+  max_tokens: 10_000_000_000
+  max_steps: null
+  checkpoint_interval_steps: 1000
+  optimizer: {type: adamw, lr: 1.5e-4, betas: [0.9, 0.95], weight_decay: 0.1}
+  scheduler: {type: cosine, warmup_tokens: 200_000_000, min_lr_ratio: 0.05}
+  precision: bf16
+  grad_clip: 1.0
+
+checkpoint:
+  save_interval_minutes: 30
+  milestone_interval_tokens: 500_000_000
+  keep_latest: 3
+
+distributed:
+  backend: fsdp
+  activation_checkpointing: true
+  fsdp_sharding_strategy: full_shard
+  fsdp_mixed_precision: true
+  profile_memory: true
+  profile_interval_steps: 10
+
+observability:
+  metrics_jsonl: true
+  events_jsonl: true
+  data_metrics_jsonl: true
+  heartbeat: true
+  console_interval_steps: 10
+  heartbeat_interval_seconds: 60
+  data_metrics_interval_seconds: 30
+  tensorboard: false
+  wandb: false
+  collect_histograms: false
+  collect_tokenizer_stats: false
+  loss_spike_window: 10
+  loss_spike_sigma: 5.0

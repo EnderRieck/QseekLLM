@@ -1,0 +1,26 @@
+extends:
+  - stage0_stream_preprocess.yaml
+
+run:
+  name: stream_preprocess_fineweb_edu_chinese_v21
+  output_dir: /mnt/DataFlow/lz/proj/agentgroup/ziyi/llmTrain/runs/stream_preprocess_fineweb_edu_chinese_v21
+  seed: 42
+
+preprocess:
+  sources:
+    - name: fineweb_edu_chinese_v21
+      type: remote_parquet
+      domain: zh
+      language: zh
+      license: see_dataset_card
+      hf_repo_id: opencsg/Fineweb-Edu-Chinese-V2.1
+      hf_revision: main
+      hf_include_patterns:
+        - "3_4/*.parquet"
+        - "4_5/*.parquet"
+      text_field: text
+      id_field: null
+      metadata_fields: ["score", "source"]
+      exclude_metadata_values:
+        source: ["CCI3", "ChineseWebText"]
+      weight: 1.0
