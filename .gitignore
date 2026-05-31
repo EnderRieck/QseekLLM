@@ -95,3 +95,6 @@ datasets/
 
 # Environment variables (contains local paths)
 .env
+# Project reports and documentation
+docs/*.pdf
+docs/*.html

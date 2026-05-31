@@ -96,7 +96,10 @@ def _expand_env_vars(obj: Any) -> Any:
                 var_name = var_expr.strip()
                 value = os.environ.get(var_name)
                 if value is None:
-                    raise ValueError(f"Environment variable ${{{var_name}}} is not set")
+                    raise ValueError(
+                        f"Environment variable ${{{var_name}}} is not set.\n"
+                        f"Please create a .env file (copy from .env.example) and set {var_name}."
+                    )
                 return value
         return re.sub(r'\$\{([^}]+)\}', replacer, obj)
     elif isinstance(obj, dict):

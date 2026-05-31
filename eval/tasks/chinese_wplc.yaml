@@ -1,0 +1,21 @@
+tag:
+  - chinese
+  - cloze
+task: chinese_wplc
+dataset_path: json
+dataset_kwargs:
+  data_files:
+    validation: eval/datasets/chinese_wplc/dev.jsonl
+output_type: loglikelihood
+validation_split: validation
+doc_to_text: "{{context}}"
+doc_to_target: "{{target}}"
+metric_list:
+  - metric: perplexity
+    aggregation: perplexity
+    higher_is_better: false
+  - metric: acc
+    aggregation: mean
+    higher_is_better: true
+metadata:
+  version: 1.0

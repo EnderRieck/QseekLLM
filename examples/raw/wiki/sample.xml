@@ -1,0 +1,18 @@
+<mediawiki>
+  <page>
+    <title>人工智能</title>
+    <ns>0</ns>
+    <id>100</id>
+    <revision>
+      <text>'''人工智能'''是计算机科学的一个领域，研究如何构建能够感知、学习和推理的系统。[[机器学习]] 是其中的重要方向。</text>
+    </revision>
+  </page>
+  <page>
+    <title>Talk:忽略页面</title>
+    <ns>1</ns>
+    <id>101</id>
+    <revision>
+      <text>讨论页不应该进入训练语料。</text>
+    </revision>
+  </page>
+</mediawiki>
