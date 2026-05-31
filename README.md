@@ -1,96 +1,96 @@
 # LLMTrain
 
-A scalable, production-ready framework for pretraining large language models with FSDP/DDP, streaming data pipeline, and comprehensive observability.
+一个可扩展的、生产就绪的大语言模型预训练框架，支持 FSDP/DDP、流式数据管道和全面的可观测性。
 
-## Features
+## 特性
 
-- **Distributed Training**: FSDP/DDP support with gradient accumulation and mixed precision
-- **Streaming Data Pipeline**: Memory-efficient parquet-based data loading with async tokenization
-- **Flexible Scheduling**: WSD (Warmup-Stable-Decay), cosine, and constant learning rate schedules
-- **In-Training Validation**: Automatic per-source perplexity evaluation during training
-- **Checkpoint Management**: DCP-based distributed checkpointing with milestone and interval saves
-- **Observability**: JSONL metrics, heartbeat monitoring, and optional W&B/TensorBoard integration
-- **Quality Filtering**: Optional text quality classification for data curation
-- **Evaluation Harness**: Integration with lm-evaluation-harness for downstream task evaluation
+- **分布式训练**：支持 FSDP/DDP，具备梯度累积和混合精度训练
+- **流式数据管道**：基于 parquet 的内存高效数据加载，支持异步分词
+- **灵活的调度策略**：WSD（预热-稳定-衰减）、余弦和恒定学习率调度
+- **训练中验证**：训练期间自动按数据源评估困惑度
+- **检查点管理**：基于 DCP 的分布式检查点，支持里程碑和间隔保存
+- **可观测性**：JSONL 指标、心跳监控，可选 W&B/TensorBoard 集成
+- **质量过滤**：可选的文本质量分类，用于数据筛选
+- **评估工具**：集成 lm-evaluation-harness 进行下游任务评估
 
-## Quick Start
+## 快速开始
 
-### Installation
+### 安装
 
 ```bash
-# Clone the repository
+# 克隆仓库
 git clone https://github.com/YOUR_USERNAME/llmTrain.git
 cd llmTrain
 
-# Install dependencies
+# 安装依赖
 pip install -e .
 
-# For evaluation support
+# 安装评估支持
 pip install -e '.[eval]'
 
-# Configure environment variables
+# 配置环境变量
 cp .env.example .env
-# Edit .env and set DATA_DIR to your data directory
+# 编辑 .env 并设置 DATA_DIR 为你的数据目录
 ```
 
-**Important**: Before running any training, copy `.env.example` to `.env` and update `DATA_DIR` to point to your data directory:
+**重要提示**：在运行任何训练之前，请将 `.env.example` 复制为 `.env` 并更新 `DATA_DIR` 指向你的数据目录：
 
 ```bash
 # .env
 DATA_DIR=/path/to/your/data
 ```
 
-The framework will automatically load environment variables from `.env` and expand them in config files (e.g., `${DATA_DIR}/train_340b/manifest.jsonl`).
+框架会自动从 `.env` 加载环境变量，并在配置文件中展开它们（例如 `${DATA_DIR}/train_340b/manifest.jsonl`）。
 
-### Training
+### 训练
 
 ```bash
-# Single-node training (8 GPUs)
+# 单节点训练（8 个 GPU）
 python run.py train --config configs/train/stage1_general_300m_v2_wsd_30b.yaml
 
-# Multi-node training
+# 多节点训练
 torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 --master_addr=... \
     run.py train --config configs/train/your_config.yaml
 ```
 
-### Evaluation
+### 评估
 
 ```bash
-# Evaluate a checkpoint
+# 评估一个检查点
 python run.py eval --config configs/eval/default_300m_v2.yaml \
     --checkpoint runs/your_run/checkpoints/milestone_030000000000
 
-# Batch evaluation of multiple checkpoints
+# 批量评估多个检查点
 bash scripts/eval_checkpoints.sh
 ```
 
-## Project Structure
+## 项目结构
 
 ```
 llmTrain/
 ├── src/llmtrain/
-│   ├── models/          # Model architectures (Qwen-like, etc.)
-│   ├── data/            # Data pipeline (reader, mixer, packer)
-│   ├── training/        # Trainer, optimizer, scheduler
-│   ├── evaluation/      # Validation callback, eval harness integration
-│   ├── checkpointing/   # DCP checkpoint save/load
-│   ├── distributed/     # FSDP/DDP setup
-│   ├── tokenizer/       # Tokenizer wrappers
-│   └── observability/   # Metrics logging
+│   ├── models/          # 模型架构（Qwen-like 等）
+│   ├── data/            # 数据管道（reader、mixer、packer）
+│   ├── training/        # Trainer、优化器、调度器
+│   ├── evaluation/      # 验证回调、评估工具集成
+│   ├── checkpointing/   # DCP 检查点保存/加载
+│   ├── distributed/     # FSDP/DDP 设置
+│   ├── tokenizer/       # 分词器封装
+│   └── observability/   # 指标日志
 ├── configs/
-│   ├── train/           # Training configurations
-│   ├── eval/            # Evaluation configurations
-│   ├── model/           # Model architecture configs
-│   ├── data/            # Data mixture configs
-│   └── tokenizer/       # Tokenizer configs
-├── scripts/             # Utility scripts
-├── tools/               # Standalone tools (validation, preprocessing)
-└── run.py               # Main entry point
+│   ├── train/           # 训练配置
+│   ├── eval/            # 评估配置
+│   ├── model/           # 模型架构配置
+│   ├── data/            # 数据混合配置
+│   └── tokenizer/       # 分词器配置
+├── scripts/             # 实用脚本
+├── tools/               # 独立工具（验证、预处理）
+└── run.py               # 主入口
 ```
 
-## Configuration
+## 配置
 
-Training is configured via YAML files with inheritance support:
+训练通过支持继承的 YAML 文件进行配置：
 
 ```yaml
 extends:
@@ -125,11 +125,11 @@ validation:
   interval_tokens: 1_000_000_000
 ```
 
-## Data Format
+## 数据格式
 
-Training data is stored as parquet shards with a JSONL manifest:
+训练数据以 parquet 分片存储，并配有 JSONL 清单文件：
 
-**Manifest entry:**
+**清单条目：**
 ```json
 {
   "id": "shard_001",
@@ -145,7 +145,7 @@ Training data is stored as parquet shards with a JSONL manifest:
 }
 ```
 
-**Parquet schema:**
+**Parquet 模式：**
 ```
 id: string
 text: string
@@ -155,34 +155,34 @@ language: string
 metadata: string (JSON)
 ```
 
-## Monitoring
+## 监控
 
-Training metrics are logged to JSONL files:
+训练指标记录到 JSONL 文件：
 
-- `metrics.jsonl`: Training loss, learning rate, throughput
-- `val_metrics.jsonl`: Validation perplexity per source
-- `data_metrics.jsonl`: Data loading statistics
-- `events.jsonl`: Training events (start, checkpoint, validation)
-- `heartbeat.json`: Real-time training status
+- `metrics.jsonl`：训练损失、学习率、吞吐量
+- `val_metrics.jsonl`：按数据源的验证困惑度
+- `data_metrics.jsonl`：数据加载统计
+- `events.jsonl`：训练事件（开始、检查点、验证）
+- `heartbeat.json`：实时训练状态
 
-## Advanced Features
+## 高级特性
 
-### In-Training Validation
+### 训练中验证
 
-Automatically evaluate on held-out data during training:
+在训练期间自动在留出数据上进行评估：
 
 ```yaml
 validation:
   enabled: true
   val_manifest: path/to/val_manifest.jsonl
-  interval_tokens: 1_000_000_000  # Eval every 1B tokens
+  interval_tokens: 1_000_000_000  # 每 1B tokens 评估一次
   max_tokens_per_source: 2_000_000
   run_at_start: true
 ```
 
-### Quality Filtering
+### 质量过滤
 
-Filter low-quality documents during data loading:
+在数据加载期间过滤低质量文档：
 
 ```yaml
 data:
@@ -193,43 +193,43 @@ data:
     apply_to_sources: [common_crawl]
 ```
 
-### Checkpoint Management
+### 检查点管理
 
 ```yaml
 checkpoint:
-  format: auto  # DCP or torch
+  format: auto  # DCP 或 torch
   save_interval_minutes: 60
-  milestone_interval_tokens: 2_000_000_000  # Save every 2B tokens
-  keep_latest: 2  # Keep last 2 interval checkpoints
+  milestone_interval_tokens: 2_000_000_000  # 每 2B tokens 保存一次
+  keep_latest: 2  # 保留最近 2 个间隔检查点
 ```
 
-## Model Architectures
+## 模型架构
 
-Currently supported:
-- **Qwen-like**: Transformer with GQA, RoPE, SwiGLU (300M, 700M, 1.7B configs provided)
+当前支持：
+- **Qwen-like**：带有 GQA、RoPE、SwiGLU 的 Transformer（提供 300M、700M、1.7B 配置）
 
-Adding new architectures:
-1. Implement model in `src/llmtrain/models/your_model.py`
-2. Register in `src/llmtrain/models/__init__.py`
-3. Add config in `configs/model/your_model.yaml`
+添加新架构：
+1. 在 `src/llmtrain/models/your_model.py` 中实现模型
+2. 在 `src/llmtrain/models/__init__.py` 中注册
+3. 在 `configs/model/your_model.yaml` 中添加配置
 
-## Performance Tips
+## 性能建议
 
-- **Batch size**: Use 2-4M tokens/step for models >1B params
-- **Activation checkpointing**: Enable for large models to save memory
-- **Async tokenization**: Set `async_tokenization: true` for faster data loading
-- **FSDP sharding**: Use `shard_grad_op` for best memory/speed tradeoff
-- **Mixed precision**: bf16 recommended for training stability
+- **批量大小**：对于 >1B 参数的模型，使用 2-4M tokens/step
+- **激活检查点**：对大模型启用以节省内存
+- **异步分词**：设置 `async_tokenization: true` 以加快数据加载
+- **FSDP 分片**：使用 `shard_grad_op` 以获得最佳内存/速度权衡
+- **混合精度**：推荐使用 bf16 以保证训练稳定性
 
-## Development
+## 开发
 
-See `DESIGN.md` and `DEVELOPMENT.md` for architecture details and Phase 1 implementation notes.
+有关架构细节和第一阶段实现说明，请参阅 `DESIGN.md` 和 `DEVELOPMENT.md`。
 
-## License
+## 许可证
 
-MIT License - see LICENSE file for details
+MIT License - 详见 LICENSE 文件
 
-## Acknowledgments
+## 致谢
 
-- Built with PyTorch, HuggingFace Transformers, and lm-evaluation-harness
-- Inspired by best practices from Llama, Qwen, and other open-source LLM projects
+- 基于 PyTorch、HuggingFace Transformers 和 lm-evaluation-harness 构建
+- 受 Llama、Qwen 和其他开源 LLM 项目最佳实践的启发
