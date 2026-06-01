@@ -1,0 +1,3 @@
+{"id":"en/001","text":"This is a compact English sample for validating streaming readers and tokenizer compression.","source":"sample_en","domain":"en","language":"en","metadata":{"quality_score":0.94}}
+{"id":"en/002","text":"The pipeline keeps manifest hashes immutable so that resumed training sees the same shards.","source":"sample_en","domain":"en","language":"en","metadata":{"quality_score":0.93}}
+{"id":"en/003","text":"General pretraining mixes web text, encyclopedic passages, papers, code, and math reasoning.","source":"sample_en","domain":"en","language":"en","metadata":{"quality_score":0.91}}

@@ -1,0 +1,9 @@
+{
+  "manifest_version": "0.1.0",
+  "created_at": "2026-05-01T12:36:53.655064+00:00",
+  "manifest_sha256": "6ba0ee2493c7ef6a1d621890e27cfc98f640a05b57d9be780115f1f7cd0b3216",
+  "num_shards": 6,
+  "total_bytes": 3846,
+  "total_records": 18,
+  "total_estimated_tokens": 387
+}

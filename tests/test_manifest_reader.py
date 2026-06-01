@@ -72,6 +72,14 @@ def test_reader_rejects_incompatible_state(tmp_path):
     state["world_size"] = 2
     with pytest.raises(IncompatibleDataState, match="world_size mismatch"):
         reader.load_state_dict(state)
+    state = reader.state_dict()
+    state["rank"] = 1
+    with pytest.raises(IncompatibleDataState, match="rank mismatch"):
+        reader.load_state_dict(state)
+    state = reader.state_dict()
+    state["worker_id"] = 1
+    with pytest.raises(IncompatibleDataState, match="worker_id mismatch"):
+        reader.load_state_dict(state)
 
 
 def test_reader_allows_hash_validation_toggle(tmp_path):

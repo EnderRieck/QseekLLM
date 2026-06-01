@@ -33,6 +33,16 @@ from llmtrain.training.trainer import Trainer
 from llmtrain.utils.config import Config, dump_resolved, load_config
 
 
+def _env_int(name: str, default: int | None = None) -> int | None:
+    value = os.environ.get(name)
+    if value is None or value.strip() == "":
+        return default
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got {value!r}") from exc
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="run.py", description="Unified llmtrain entrypoint.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -59,6 +69,35 @@ def _add_train_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
         "--gpus",
         default=None,
         help="Comma-separated visible GPU ids for training, or 'all'. Implies CUDA_VISIBLE_DEVICES selection.",
+    )
+    parser.add_argument(
+        "--nnodes",
+        type=int,
+        default=_env_int("LLMTRAIN_NNODES", 1),
+        help="Number of training nodes. Can also be set with LLMTRAIN_NNODES in .env.",
+    )
+    parser.add_argument(
+        "--node-rank",
+        type=int,
+        default=_env_int("LLMTRAIN_NODE_RANK"),
+        help="Rank of this node for multi-node torchrun. Can also be set with LLMTRAIN_NODE_RANK in .env.",
+    )
+    parser.add_argument(
+        "--master-addr",
+        default=os.environ.get("LLMTRAIN_MASTER_ADDR"),
+        help="Master node address for multi-node torchrun. Can also be set with LLMTRAIN_MASTER_ADDR in .env.",
+    )
+    parser.add_argument(
+        "--master-port",
+        type=int,
+        default=_env_int("LLMTRAIN_MASTER_PORT", 29500),
+        help="Master node port for multi-node torchrun. Can also be set with LLMTRAIN_MASTER_PORT in .env.",
+    )
+    parser.add_argument(
+        "--nproc-per-node",
+        type=int,
+        default=_env_int("LLMTRAIN_NPROC_PER_NODE"),
+        help="Processes per node. Defaults to visible CUDA device count. Can also be set with LLMTRAIN_NPROC_PER_NODE in .env.",
     )
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--output-dir", default=None)
@@ -548,7 +587,13 @@ def _should_launch_torchrun(args: argparse.Namespace) -> bool:
         return False
     if os.environ.get("RANK") is not None or os.environ.get("WORLD_SIZE") not in (None, "1"):
         return False
-    return _resolve_train_nproc_per_node(args.device) > 1
+    if args.nnodes < 1:
+        raise ValueError("--nnodes must be >= 1")
+    if args.master_port < 1:
+        raise ValueError("--master-port must be >= 1")
+    if args.nnodes > 1:
+        return True
+    return _resolve_train_nproc_per_node(args.device, args.nproc_per_node) > 1
 
 
 def _should_launch_eval_torchrun(args: argparse.Namespace) -> bool:
@@ -559,7 +604,11 @@ def _should_launch_eval_torchrun(args: argparse.Namespace) -> bool:
     return _resolve_train_nproc_per_node(args.device) > 1
 
 
-def _resolve_train_nproc_per_node(device_mode: str) -> int:
+def _resolve_train_nproc_per_node(device_mode: str, override: int | None = None) -> int:
+    if override is not None:
+        if override < 1:
+            raise ValueError("--nproc-per-node must be >= 1")
+        return override
     if device_mode == "cpu":
         return 1
     if device_mode == "cuda":
@@ -591,8 +640,8 @@ def _resolve_gpu_selection(spec: str | None) -> list[str] | None:
 
 
 def _launch_torchrun(args: argparse.Namespace) -> None:
-    nproc = _resolve_train_nproc_per_node(args.device)
-    if nproc <= 1:
+    nproc = _resolve_train_nproc_per_node(args.device, args.nproc_per_node)
+    if nproc <= 1 and args.nnodes <= 1:
         return
     repo_root = Path(__file__).resolve().parents[3]
     script = repo_root / "run.py"
@@ -602,16 +651,40 @@ def _launch_torchrun(args: argparse.Namespace) -> None:
         sys.executable,
         "-m",
         "torch.distributed.run",
-        "--standalone",
-        "--nproc-per-node",
-        str(nproc),
-        str(script),
-        "train",
-        "--config",
-        args.config,
-        "--device",
-        args.device,
     ]
+    if args.nnodes > 1:
+        if args.node_rank is None:
+            raise ValueError("--node-rank is required when --nnodes > 1")
+        if args.node_rank < 0 or args.node_rank >= args.nnodes:
+            raise ValueError("--node-rank must be in [0, nnodes)")
+        if not args.master_addr:
+            raise ValueError("--master-addr is required when --nnodes > 1")
+        cmd.extend(
+            [
+                "--nnodes",
+                str(args.nnodes),
+                "--nproc-per-node",
+                str(nproc),
+                "--node_rank",
+                str(args.node_rank),
+                "--master_addr",
+                args.master_addr,
+                "--master_port",
+                str(args.master_port),
+            ]
+        )
+    else:
+        cmd.extend(["--standalone", "--nproc-per-node", str(nproc)])
+    cmd.extend(
+        [
+            str(script),
+            "train",
+            "--config",
+            args.config,
+            "--device",
+            args.device,
+        ]
+    )
     passthrough = [
         "--resume-from",
         args.resume_from,
@@ -702,7 +775,15 @@ def _launch_torchrun(args: argparse.Namespace) -> None:
     if args.no_resume:
         cmd.append("--no-resume")
     if torch.cuda.is_available():
-        print(f"[run.py] launching torchrun with nproc-per-node={nproc}", file=sys.stderr)
+        if args.nnodes > 1:
+            print(
+                "[run.py] launching torchrun "
+                f"with nnodes={args.nnodes} nproc-per-node={nproc} "
+                f"node-rank={args.node_rank} master={args.master_addr}:{args.master_port}",
+                file=sys.stderr,
+            )
+        else:
+            print(f"[run.py] launching torchrun with nproc-per-node={nproc}", file=sys.stderr)
     raise SystemExit(_run_process_group(cmd, env=env, label="torchrun"))
 
 

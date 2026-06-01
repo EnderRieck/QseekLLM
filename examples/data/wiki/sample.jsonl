@@ -1,0 +1,3 @@
+{"id":"wiki/001","text":"百科条目通常使用中性语气描述人物、地点、概念和历史事件。","source":"sample_wiki","domain":"wiki","language":"zh","metadata":{"quality_score":0.92}}
+{"id":"wiki/002","text":"上海是中国东部沿海的重要城市，拥有港口、金融服务和高校资源。","source":"sample_wiki","domain":"wiki","language":"zh","metadata":{"quality_score":0.91}}
+{"id":"wiki/003","text":"计算机科学研究算法、系统、数据结构、编程语言和人工智能。","source":"sample_wiki","domain":"wiki","language":"zh","metadata":{"quality_score":0.9}}

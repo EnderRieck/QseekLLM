@@ -1,0 +1,3 @@
+{"id":"zh/001","text":"这是一个用于预训练数据管线验证的中文样例。它包含常见词汇、标点和简单事实。","source":"sample_zh","domain":"zh","language":"zh","metadata":{"quality_score":0.95}}
+{"id":"zh/002","text":"大语言模型训练需要稳定的数据读取、可恢复状态以及清晰的配置系统。","source":"sample_zh","domain":"zh","language":"zh","metadata":{"quality_score":0.92}}
+{"id":"zh/003","text":"中文文本会测试分词器对汉字、数字 2026 和英文 token 的混合处理。","source":"sample_zh","domain":"zh","language":"zh","metadata":{"quality_score":0.9}}

@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 try:
     from dotenv import load_dotenv
-    load_dotenv()  # Load .env file if it exists
+    load_dotenv(Path(__file__).resolve().parents[3] / ".env")  # Load repository .env if it exists.
 except ImportError:
     pass  # dotenv is optional
 

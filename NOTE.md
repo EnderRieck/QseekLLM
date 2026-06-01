@@ -22,6 +22,30 @@ python run.py train \
     --gpus all \
     --device cuda
 
+双机 16 卡训练命令：
+
+MCCL/NCCL环境变量、节点数、master地址默认从 `.env` 自动读取。由于 `.env` 在共享盘上，两台机器不要在里面写死 `LLMTRAIN_NODE_RANK`，启动时分别传 `--node-rank 0/1`。
+
+节点0（master，以 `.env` 里的 `LLMTRAIN_MASTER_ADDR` 为准）：
+```bash
+python run.py train \
+    --config configs/train/stage1_general_wsd_50b.yaml \
+    --gpus all \
+    --device cuda \
+    --node-rank 0
+```
+
+节点1：
+```bash
+python run.py train \
+    --config configs/train/stage1_general_wsd_50b.yaml \
+    --gpus all \
+    --device cuda \
+    --node-rank 1
+```
+
+注意：`master_addr` 使用节点0的 10.201.x.x 地址，不要使用 172.17.x.x；重启开发机后 10.201 地址可能变化，需要同步更新 `.env` 里的 `LLMTRAIN_MASTER_ADDR`。跨节点 NCCL/MCCL smoke test 已验证 8 卡/节点 all_reduce 正常，sum=16。
+
 推理命令：
 ```bash
 python run.py infer \
@@ -40,9 +64,9 @@ python run.py infer \
 ```bash
 PYTHONPATH=src python -m torch.distributed.run --standalone --nproc-per-node 8 \
     tools/export_checkpoint.py \
-    --config configs/train/stage1_general_700m.yaml \
-    --checkpoint runs/stage1_general_700m/checkpoints/best \
-    --output runs/stage1_general_700m/checkpoints/best_infer
+    --config configs/train/stage1_general_300m_v2_wsd_30b.yaml \
+    --checkpoint runs/stage1_general_300m_v2_wsd_30b/checkpoints/latest \
+    --output runs/stage1_general_300m_v2_wsd_30b/checkpoints/latest_infer
 ```
 
 测评：

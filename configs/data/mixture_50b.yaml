@@ -1,0 +1,90 @@
+data:
+  manifest_path: manifests/50b/manifest.jsonl
+  sources:
+    - name: cci3_hq
+      domain: zh
+      language: zh
+      source_filter: cci3_hq
+      weight: 0.07
+      target_ratio: 0.07
+      paths: []
+    - name: fineweb_edu_chinese_v21
+      domain: zh
+      language: zh
+      source_filter: fineweb_edu_chinese_v21
+      weight: 0.22
+      target_ratio: 0.22
+      paths: []
+    - name: chinese_webtext_2
+      domain: zh
+      language: zh
+      source_filter: chinese_webtext_2
+      weight: 0.025
+      target_ratio: 0.025
+      paths: []
+    - name: english_general
+      domain: en
+      language: en
+      weight: 0.23
+      target_ratio: 0.23
+      paths: []
+    - name: code
+      domain: code
+      language: multi
+      weight: 0.15
+      target_ratio: 0.15
+      paths: []
+    - name: math
+      domain: math
+      language: multi
+      weight: 0.13
+      target_ratio: 0.13
+      paths: []
+    - name: paper
+      domain: paper
+      language: en
+      weight: 0.0
+      target_ratio: 0.0
+      paths: []
+    - name: zhwiki
+      domain: wiki
+      language: zh
+      source_filter: zhwiki
+      weight: 0.015
+      target_ratio: 0.015
+      paths: []
+    - name: enwiki
+      domain: wiki
+      language: en
+      source_filter: enwiki
+      weight: 0.015
+      target_ratio: 0.015
+      paths: []
+  reader:
+    world_size: 1
+    rank: 0
+    num_workers: 1
+    worker_id: 0
+    quarantine_threshold: 5
+  pipeline:
+    min_chars: 1
+    max_chars: null
+    min_quality_score: null
+    normalize_whitespace: true
+  mixer:
+    temperature: 1.0
+    seed: 42
+  packing:
+    seq_len: 4096
+    batch_size: 1
+  tokenizer_sampling:
+    byte_budget: 200000000000
+    ratios:
+      zh: 0.375
+      en: 0.20
+      code: 0.15
+      math: 0.10
+      paper: 0.0
+      wiki: 0.015
+    seed: 42
+  allowed_formats: ["jsonl", "parquet"]

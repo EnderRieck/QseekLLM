@@ -389,6 +389,29 @@ def test_grad_accum_uses_global_batch_across_ranks(tmp_path):
     assert trainer.grad_accum_steps == 24
 
 
+def test_trainer_selects_rank_local_distributed_data_state():
+    ctx = FakeDistributedContext()
+    ctx.rank = 5
+    trainer = object.__new__(Trainer)
+    trainer.distributed = ctx
+    trainer.data_parallel_world_size = ctx.world_size
+    state = {
+        "mode": "distributed_data_state",
+        "world_size": ctx.world_size,
+        "rank_states": {"0": {"rank": 0}, "5": {"rank": 5}},
+    }
+    assert trainer._data_state_for_current_rank(state) == {"rank": 5}
+
+
+def test_trainer_skips_legacy_single_rank_data_state_on_non_main_rank():
+    ctx = FakeDistributedContext()
+    ctx.rank = 3
+    trainer = object.__new__(Trainer)
+    trainer.distributed = ctx
+    trainer.data_parallel_world_size = ctx.world_size
+    assert trainer._data_state_for_current_rank({"mode": "async_tokenization"}) == {}
+
+
 def test_grad_accum_uses_no_sync_before_sync_step(tmp_path):
     cfg = make_cfg(tmp_path)
     cfg = cfg.model_copy(

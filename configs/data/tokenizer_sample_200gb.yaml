@@ -1,0 +1,13 @@
+data:
+  tokenizer_sampling:
+    byte_budget: 50000000000
+    output_dir: runs/stage0_data_tokenizer/tokenizer_corpus
+    output_shard_bytes: 1073741824
+    num_workers: 64
+    ratios:
+      zh: 0.35
+      en: 0.25
+      code: 0.20
+      math: 0.15
+      wiki: 0.05
+    seed: 42

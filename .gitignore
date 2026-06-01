@@ -36,22 +36,14 @@ env/
 .DS_Store
 
 # Training outputs
-runs/
-logs/
-checkpoints/
+/runs
+/logs
+/checkpoints
 *.log
-*.jsonl
-*.tsv
-*.png
-*.jpg
-*.jpeg
 
 # Data
-data/
-datasets/
-*.parquet
-*.arrow
-*.bin
+/datasets
+/eval/datasets
 *.safetensors
 *.pt
 *.pth
@@ -69,10 +61,10 @@ temp/
 *.ipynb
 
 # Model files (too large for git)
-models/
-*.model
-*.bin
-*.gguf
+# models/
+# *.model
+# *.bin
+# *.gguf
 
 # Config overrides (may contain sensitive paths)
 configs/**/*local*.yaml
@@ -89,9 +81,6 @@ node_modules/
 
 # HuggingFace cache
 hf_cache/
-
-# Datasets (too large)
-datasets/
 
 # Environment variables (contains local paths)
 .env

@@ -134,7 +134,7 @@ class Trainer:
         )
         self.state = TrainerState.from_state_dict(meta.get("trainer_state"))
         if hasattr(self.data_iterator, "load_state_dict"):
-            self.data_iterator.load_state_dict(meta.get("data_state", {}))
+            self.data_iterator.load_state_dict(self._data_state_for_current_rank(meta.get("data_state", {})))
         if self.validation_callback is not None:
             self.validation_callback.load_state_dict(
                 {"last_bucket": self.state.last_validation_bucket, "has_run_once": self.state.last_validation_bucket > 0}
@@ -156,7 +156,7 @@ class Trainer:
             optimizer=self.optimizer,
             scheduler=self.scheduler,
             trainer_state=self.state.state_dict(),
-            data_state=self.data_iterator.state_dict() if hasattr(self.data_iterator, "state_dict") else {},
+            data_state=self._checkpoint_data_state(distributed),
             cfg=self.cfg,
             chain=self.chain,
             manifest_metadata=self.manifest_metadata,
@@ -172,6 +172,40 @@ class Trainer:
         if distributed and checkpoint_format == "torch":
             barrier()
         return path
+
+    def _checkpoint_data_state(self, distributed: bool) -> dict[str, Any]:
+        local_state = self.data_iterator.state_dict() if hasattr(self.data_iterator, "state_dict") else {}
+        if not distributed or not (dist.is_available() and dist.is_initialized()):
+            return local_state
+        gathered: list[Any] | None = [None for _ in range(self.data_parallel_world_size)] if self._is_main else None
+        dist.gather_object(local_state, object_gather_list=gathered, dst=0)
+        if not self._is_main:
+            return {}
+        return {
+            "mode": "distributed_data_state",
+            "world_size": self.data_parallel_world_size,
+            "rank_states": {str(rank): state for rank, state in enumerate(gathered or [])},
+        }
+
+    def _data_state_for_current_rank(self, data_state: dict[str, Any]) -> dict[str, Any]:
+        if not data_state:
+            return {}
+        distributed = self.distributed is not None and self.distributed.enabled
+        if data_state.get("mode") == "distributed_data_state":
+            expected_world_size = self.data_parallel_world_size
+            if data_state.get("world_size") != expected_world_size:
+                raise RuntimeError(
+                    "Distributed data checkpoint world_size mismatch: "
+                    f"expected {expected_world_size}, got {data_state.get('world_size')}"
+                )
+            rank = self.distributed.rank if self.distributed is not None else 0
+            rank_state = data_state.get("rank_states", {}).get(str(rank))
+            if rank_state is None:
+                raise RuntimeError(f"Missing data checkpoint state for rank {rank}")
+            return rank_state
+        if distributed and not self._is_main:
+            return {}
+        return data_state
 
     def _finalize_step(self, loss_sum_tensor: torch.Tensor, accum: int) -> tuple[float, float]:
         grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.trainer.grad_clip)

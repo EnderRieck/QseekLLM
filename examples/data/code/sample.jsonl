@@ -1,0 +1,3 @@
+{"id":"code/001","text":"def add(a, b):\n    return a + b\n\nprint(add(2, 3))","source":"sample_code","domain":"code","language":"multi","metadata":{"quality_score":0.96}}
+{"id":"code/002","text":"class Buffer:\n    def __init__(self):\n        self.items = []\n    def push(self, x):\n        self.items.append(x)","source":"sample_code","domain":"code","language":"multi","metadata":{"quality_score":0.94}}
+{"id":"code/003","text":"for token_id, doc_id in zip(input_ids, document_ids):\n    assert isinstance(token_id, int)","source":"sample_code","domain":"code","language":"multi","metadata":{"quality_score":0.9}}
