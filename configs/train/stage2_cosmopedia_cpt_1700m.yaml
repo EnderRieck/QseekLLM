@@ -1,0 +1,119 @@
+# Continued pre-training (CPT) of the 1.7B model on chinese-cosmopedia.
+# PURPOSE: improve output STYLE / naturalness (model output currently not natural
+# enough). cosmopedia = clean fluent textbook-style synthetic text -> it dominates
+# the mixture (0.80) as the style teacher; the rest (0.20) is a LIGHT
+# anti-forgetting replay of EN(dolma)/code/math. See data/cosmopedia_cpt_mixture.
+#
+# Warm-starts from the stage1 1.7B run `runs/stage1_general` (50B general mixture).
+# CPT loads MODEL WEIGHTS ONLY with a FRESH optimizer/scheduler/step counter --
+# use `--init-from`, NOT `--resume-from` (the latter restores the old step +
+# consumed_tokens and would overshoot this run's token budget instantly).
+# This CPT is step 1 of the pipeline; the 4k/8k/16k long-context stages init from
+# ITS output (runs/stage2_cosmopedia_cpt_1700m/checkpoints/<final>).
+#
+# Launch (8x C500), once the stage1 run has the checkpoint you want as base:
+#   export HF_ENDPOINT=https://hf-mirror.com
+#   conda run -n llmtrain python run.py train \
+#     --config configs/train/stage2_cosmopedia_cpt_1700m.yaml \
+#     --device cuda --gpus all \
+#     --init-from runs/stage1_general/checkpoints/milestone_050000000000
+#   # (or the final 50B checkpoint / latest_step_* once stage1 finishes)
+#
+# RESUME (if this CPT run crashes mid-way): pass the SAME --init-from again, e.g.
+#   conda run -n llmtrain python run.py train --config <this> --device cuda --gpus all \
+#     --init-from runs/stage1_general/checkpoints/milestone_050000000000
+# The auto-dedup exclusion (shards stage1 already consumed) must be re-applied on
+# resume or the readers' shard lists won't match the saved data_state -> reader
+# current_shard_id mismatch. run.py recomputes exclude_uris whenever --init-from is
+# given (incl. on resume); without it, --resume-from of this run will fail.
+#
+# Run build_cpt_manifest.sh first. Style touch-up only: max_tokens 1B (cosmopedia
+# 0.80 -> ~0.8B), a light pass — naturalness shift doesn't need a full epoch.
+# milestone_interval_tokens lowered to 250M below so a 1B run still saves milestones.
+
+extends:
+  - ../data/cosmopedia_cpt_mixture.yaml
+  - ../tokenizer/hf_byte_bpe_150k.yaml
+  - ../model/qwen_like_1_7b.yaml
+
+run:
+  name: stage2_cosmopedia_cpt_1700m
+  output_dir: runs/stage2_cosmopedia_cpt_1700m
+  seed: 42
+
+data:
+  validate_hashes: false
+  reader:
+    parquet_batch_size: 16384
+  mixer:
+    temperature: 1.0
+    seed: 42
+  packing:
+    seq_len: 4096
+    batch_size: 1
+    async_tokenization: true
+    producer_workers: 16
+    queue_max_batches: 64
+
+model: {}
+
+trainer:
+  # C500 (沐曦) throughput differs from NVIDIA; profile before raising micro_batch_size.
+  micro_batch_size: 4
+  global_batch_size: 512          # 512 * 4096 = 2.1M tokens/step
+  max_tokens: 1_000_000_000       # USER: style touch-up only, a light pass is enough (was 30B)
+  max_steps: null
+  checkpoint_interval_steps: 100   # ~476 steps total at gbs512/seq4096
+  optimizer:
+    type: adamw
+    lr: 1.5e-4                     # CPT peak ~= 1/2 of the 3e-4 stage1 peak
+    betas: [0.9, 0.95]
+    weight_decay: 0.1
+    fused: true
+  scheduler:
+    type: wsd
+    warmup_tokens: 30_000_000      # ~3% re-warmup for the new distribution
+    decay_tokens: 200_000_000      # ~20% decay tail
+    min_lr_ratio: 0.05
+  precision: bf16
+  grad_clip: 1.0
+
+checkpoint:
+  format: auto
+  save_best: false
+  save_interval_minutes: 60
+  milestone_interval_tokens: 250_000_000   # 1B run: save ~4 milestones (final ~milestone_001000000000)
+  keep_latest: 2
+
+distributed:
+  backend: fsdp
+  activation_checkpointing: false
+  gradient_accumulation_no_sync: true
+  compile_model: false
+  compile_mode: default
+  fsdp_sharding_strategy: shard_grad_op
+  fsdp_auto_wrap_policy: transformer_block
+  fsdp_mixed_precision: true
+  fsdp_use_orig_params: true
+  fsdp_forward_prefetch: true
+  fsdp_backward_prefetch: pre
+  profile_memory: true
+  profile_interval_steps: 50
+
+observability:
+  metrics_jsonl: true
+  events_jsonl: true
+  data_metrics_jsonl: true
+  heartbeat: true
+  console_interval_steps: 10
+  heartbeat_interval_seconds: 60
+  data_metrics_interval_seconds: 30
+  tensorboard: false
+  wandb: false
+  collect_histograms: false
+  collect_tokenizer_stats: false
+  loss_spike_window: 10
+  loss_spike_sigma: 5.0
+
+validation:
+  enabled: false   # no cosmopedia held-out set yet; enable + point val_manifest to add one

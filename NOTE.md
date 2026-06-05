@@ -14,6 +14,10 @@
 
 在单纯的余弦衰减下，模型的loss能够单调下降，但在后期下降放缓，且这种学习率调度策略的灵活度有限，模型几乎只能在最初学习率较高的时候大量学习，而后续学习相当于只是微调，因此我想尝试更灵活的学习率调度策略。下一步测试WSD策略，首先warmup，然后在stable（固定学习率）下完成大部分Token的学习，最后再接入衰减阶段，让模型顺利收敛。
 
+由于中文的数据质量一般，为了提高模型输出中文文本的质量，我又基于Chinese-Cosmopedia进行了一个小型的继续预训练（CPT），并保留40%的比重用于上阶段训练数据的replay，防止模型出现灾难性遗忘。一共使用1B数据。
+
+接下来，使用较长的语料（书籍、论文以及长代码文件）进行上下文加长的训练，让模型见一些长文本，以帮助其上下文窗口扩展至16K。采用分阶段的扩展方式，首先用2B数据从4K扩展至8K，接下来用3B数据从8K扩展至16K。数据配比如下：长文本72%，其他防遗忘文本28%，长文本中又分为STEM风格（45%）与一般风格（27%），分别为数学、代码、论文等面向后续推理型后训练的数据，以及一般的书籍、长网页等长文本。
+
 
 # 常用命令
 训练命令：
@@ -42,6 +46,15 @@ python run.py train \
     --gpus all \
     --device cuda \
     --node-rank 1
+
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 python run.py train \
+    --config configs/train/stage1_general_wsd_50b.yaml \
+    --gpus all \
+    --nproc-per-node 7 \
+    --device cuda \
+    --node-rank 1 \
+    --micro-batch-size 1 \
+    --global-batch-size 504
 ```
 
 注意：`master_addr` 使用节点0的 10.201.x.x 地址，不要使用 172.17.x.x；重启开发机后 10.201 地址可能变化，需要同步更新 `.env` 里的 `LLMTRAIN_MASTER_ADDR`。跨节点 NCCL/MCCL smoke test 已验证 8 卡/节点 all_reduce 正常，sum=16。
@@ -49,12 +62,12 @@ python run.py train \
 推理命令：
 ```bash
 python run.py infer \
-    --config configs/train/stage1_general_300m_v2_wsd_30b.yaml \
-    --checkpoint /mnt/paper2any/ziyi/llmTrain/runs/stage1_general_300m_v2_wsd_30b/checkpoints/milestone_030000000000 \
+    --config configs/train/stage_ext_16k_1700m.yaml \
+    --checkpoint /mnt/paper2any/ziyi/llmTrain/runs/stage_ext_16k/checkpoints/milestone_003000000000 \
     --device cuda \
     --dtype bf16 \
-    --prompt "从前，一个年轻的学生在图书馆里发现了一本旧书" \
-    --temperature 1.0 \
+    --prompt "爱因斯坦是" \
+    --temperature 0.4 \
     --max-new-tokens 256 \
     --stream \
     --kv-cache
@@ -64,15 +77,15 @@ python run.py infer \
 ```bash
 PYTHONPATH=src python -m torch.distributed.run --standalone --nproc-per-node 8 \
     tools/export_checkpoint.py \
-    --config configs/train/stage1_general_300m_v2_wsd_30b.yaml \
-    --checkpoint runs/stage1_general_300m_v2_wsd_30b/checkpoints/latest \
-    --output runs/stage1_general_300m_v2_wsd_30b/checkpoints/latest_infer
+    --config configs/train/stage1_general_resume_30b_wsd_50b.yaml \
+    --checkpoint runs/stage1_general/checkpoints/latest \
+    --output runs/stage1_general/checkpoints/latest_infer
 ```
 
 测评：
 ```bash
 python run.py eval \
-    --config configs/eval/stage1_general_700m.yaml \
+    --config configs/train/stage_ext_16k_1700m.yaml \
     --checkpoint /mnt/paper2any/ziyi/llmTrain/runs/stage1_general_700m_v2/checkpoints/latest \
     --output-dir runs/eval_700m_v2 \
     --run-name stage1_700m_15B \

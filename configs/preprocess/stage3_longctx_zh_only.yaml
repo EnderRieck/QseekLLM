@@ -1,0 +1,45 @@
+# Targeted re-preprocess of ONLY longdata_zh (8 sub-sources; cci + wiki_zh removed
+# because stage1 already trained on cci3_hq + zhwiki — avoid duplication).
+# peS2o and webnovel shards from the main longctx run are kept as-is; this run's
+# longdata_zh manifest lines replace the old ones in runs/longctx_pool/manifest.jsonl.
+extends:
+  - stage0_stream_preprocess.yaml
+
+run:
+  name: stream_preprocess_longctx_zh
+  output_dir: /mnt/DataFlow/lz/proj/agentgroup/ziyi/llmTrain/runs/stream_preprocess_longctx_zh
+  seed: 42
+
+data:
+  manifest_path: /mnt/DataFlow/lz/proj/agentgroup/ziyi/llmTrain/runs/stream_preprocess_longctx_zh/manifest.jsonl
+
+preprocess:
+  writer:
+    output_dir: runs/stream_preprocess_longctx_zh
+    rejected_path: runs/stream_preprocess_longctx_zh/rejected.jsonl
+  dedup:
+    state_dir: runs/stream_preprocess_longctx_zh/dedup_state
+  cleaning:
+    min_chars: 2000
+    max_chars: 8000000
+    normalize_unicode: true
+    normalize_whitespace: true
+    remove_boilerplate: true
+    min_alpha_or_cjk_ratio: 0.10
+    max_repeated_line_ratio: 0.45
+    max_control_char_ratio: 0.03
+  quality:
+    scorer: heuristic
+    min_score: 0.30
+  sources:
+    - name: longdata_zh
+      type: jsonl
+      domain: mixed
+      language: zh
+      license: see_dataset_card
+      paths:
+        - /mnt/paper2any/ziyi/llmTrain/datasets/LongData-Corpus/extracted/*.jsonl
+      text_field: text
+      id_field: doc_id
+      metadata_fields: ["source", "doc_id"]
+      weight: 0.30

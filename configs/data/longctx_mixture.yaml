@@ -1,0 +1,53 @@
+# Long-context data mixture for the 4k -> 8k -> 16k extension curriculum,
+# leaning toward STEM/reasoning to prep for later RL:
+#   STEM core (code+math+papers) 0.45 | other long 0.27 | general 0.28  (~0.72 long-doc).
+# Drawn from a merged manifest = train_340b pool (general + the_stack_v1 code +
+# proof_pile_2/openwebmath math) plus newly-preprocessed long sources
+# (peS2o s2orc, webnovel, LongData_zh, redpajama book/cc).
+#
+# Build the merged manifest first:  tools/build_longctx_manifest.sh
+# seq_len / max_position_embeddings are overridden per stage (4096/8192/16384).
+data:
+  manifest_path: /mnt/DataFlow/lz/proj/agentgroup/ziyi/llmTrain/runs/longctx_pool/manifest.jsonl
+  validate_hashes: false
+  sources:
+    # ---------- STEM / reasoning core (0.45) — all long-doc, doubles as length signal ----------
+    # proof_pile_2 = arxiv math, mean 17k tok (75% >=8k, 38% >=16k): best long+STEM source.
+    - {name: code_long,    domain: code,  language: multi, source_filter: the_stack_v1,            weight: 0.20, target_ratio: 0.20, paths: []}
+    - {name: proof_pile_2, domain: math,  language: multi, source_filter: proof_pile_2,             weight: 0.12, target_ratio: 0.12, paths: []}
+    - {name: pes2o_s2orc,  domain: paper, language: en,    source_filter: pes2o_s2orc,             weight: 0.10, target_ratio: 0.10, paths: []}
+    - {name: openwebmath,  domain: math,  language: en,    source_filter: openwebmath,              weight: 0.03, target_ratio: 0.03, paths: []}
+    # ---------- other LONG (0.27) ----------
+    - {name: longdata_zh,  domain: zh,    language: zh,    source_filter: longdata_zh,             weight: 0.15, target_ratio: 0.15, paths: []}
+    - {name: webnovel_cn,  domain: fiction, language: zh,  source_filter: webnovel_cn,             weight: 0.05, target_ratio: 0.05, paths: []}
+    - {name: redpajama_book, domain: book, language: en,   source_filter: redpajama_book,          weight: 0.04, target_ratio: 0.04, paths: []}
+    - {name: redpajama_cc, domain: en,    language: en,    source_filter: redpajama_cc,            weight: 0.03, target_ratio: 0.03, paths: []}
+    # ---------- GENERAL / anti-forgetting (0.28) ----------
+    - {name: fineweb_edu_chinese_v21, domain: zh,   language: zh, source_filter: fineweb_edu_chinese_v21, weight: 0.12, target_ratio: 0.12, paths: []}
+    - {name: cci3_hq,      domain: zh,    language: zh,    source_filter: cci3_hq,                  weight: 0.03, target_ratio: 0.03, paths: []}
+    - {name: dolma,        domain: en,    language: en,    source_filter: dolma,                    weight: 0.06, target_ratio: 0.06, paths: []}
+    - {name: fineweb_edu,  domain: en,    language: en,    source_filter: fineweb_edu,              weight: 0.03, target_ratio: 0.03, paths: []}
+    - {name: zhwiki,       domain: wiki,  language: zh,    source_filter: zhwiki,                   weight: 0.02, target_ratio: 0.02, paths: []}
+    - {name: enwiki,       domain: wiki,  language: en,    source_filter: enwiki,                   weight: 0.02, target_ratio: 0.02, paths: []}
+  reader:
+    world_size: 1
+    rank: 0
+    num_workers: 1
+    worker_id: 0
+    quarantine_threshold: 5
+    parquet_batch_size: 8192
+  pipeline:
+    min_chars: 1
+    max_chars: null
+    min_quality_score: null
+    normalize_whitespace: true
+  mixer:
+    temperature: 0.9
+    seed: 42
+  packing:
+    seq_len: 4096          # overridden per stage
+    batch_size: 1
+    async_tokenization: true
+    producer_workers: 16
+    queue_max_batches: 32
+  allowed_formats: ["jsonl", "parquet"]

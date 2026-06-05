@@ -64,6 +64,12 @@ def _add_train_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
     parser.add_argument("--config", required=True)
     parser.add_argument("--resume-from", default=None)
     parser.add_argument("--no-resume", action="store_true", help="Ignore checkpoints/latest even if it exists.")
+    parser.add_argument(
+        "--init-from",
+        default=None,
+        help="Warm-start: load MODEL WEIGHTS ONLY from this checkpoint (fresh optimizer/scheduler/step). "
+        "For continued pre-training (CPT). Ignored if resuming an existing run.",
+    )
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto", help="Training launcher device mode; cuda/auto may auto-launch torchrun.")
     parser.add_argument(
         "--gpus",
@@ -111,6 +117,7 @@ def _add_train_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
     parser.add_argument("--fsdp-auto-wrap-policy", choices=["none", "transformer_block"], default=None)
     parser.add_argument("--fsdp-use-orig-params", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--fsdp-sharding-strategy", choices=["full_shard", "shard_grad_op", "no_shard"], default=None)
+    parser.add_argument("--ddp-init-sync", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--micro-batch-size", type=int, default=None)
     parser.add_argument("--global-batch-size", type=int, default=None)
     parser.add_argument("--max-tokens", type=int, default=None)
@@ -202,6 +209,45 @@ def run_train(args: argparse.Namespace) -> None:
     tokenizer = load_tokenizer(cfg.tokenizer)
     manifest_meta = validate_manifest(cfg.data.manifest_path, validate_shards=cfg.data.validate_hashes).model_dump(mode="json")
     manifest_meta_model = validate_manifest(cfg.data.manifest_path, validate_shards=cfg.data.validate_hashes)
+    # Resolve warm-start / resume BEFORE building the data pipeline so we can auto-
+    # deduplicate. A warm-start (--init-from) starts a NEW stage from another run's
+    # weights; we then exclude the shards that source run already consumed so the new
+    # stage does not retrain on the same data.
+    ckpt_manager = CheckpointManager(
+        cfg.run.output_dir,
+        keep_latest=cfg.checkpoint.keep_latest,
+        checkpoint_format=cfg.checkpoint.format,
+    )
+    resume_from = None if args.no_resume else args.resume_from
+    if resume_from is None and not args.no_resume:
+        latest = ckpt_manager.latest_checkpoint()
+        resume_from = str(latest) if latest else None
+    # Auto-dedup source = the warm-start origin (--init-from). consumed_shard_uris
+    # recurses the whole init-from chain, so excluding it covers every upstream layer
+    # (stage1 -> CPT -> 8k -> ...). On a --resume-from we recover the source from the
+    # checkpoint meta (init_from), so resume needs only --resume-from -- the exclusion
+    # is re-applied automatically (required, or the rebuilt reader shard lists wouldn't
+    # match the saved data_state -> current_shard_id mismatch). Checkpoints written
+    # before meta carried init_from return None here -> for those, still pass
+    # --init-from on resume. (load_model below stays gated on `resume_from is None`:
+    # resume restores the model from this run's own checkpoint.)
+    exclude_uris: set[str] | None = None
+    dedup_source = args.init_from
+    if dedup_source is None and resume_from is not None:
+        from llmtrain.data.dedup import checkpoint_init_from
+
+        dedup_source = checkpoint_init_from(resume_from)
+    if dedup_source:
+        from llmtrain.data.dedup import consumed_shard_uris
+
+        exclude_uris = consumed_shard_uris(dedup_source)
+        if dist_ctx.is_main:
+            tag = "init-from" if resume_from is None else "resume, recovered from meta"
+            print(
+                f"[run.py] auto-dedup ({tag}): excluding {len(exclude_uris)} shards "
+                f"consumed by the warm-start chain from {dedup_source}",
+                file=sys.stderr,
+            )
     stream = TrainingRecordStream(
         manifest_path=cfg.data.manifest_path,
         sources=cfg.data.sources,
@@ -215,6 +261,7 @@ def run_train(args: argparse.Namespace) -> None:
         parquet_batch_size=cfg.data.reader.parquet_batch_size,
         mixer_temperature=cfg.data.mixer.temperature,
         manifest_meta=manifest_meta_model,
+        exclude_uris=exclude_uris,
     )
     if cfg.data.packing.async_tokenization:
         data_iterator = AsyncPackedDataIterator(
@@ -236,6 +283,7 @@ def run_train(args: argparse.Namespace) -> None:
             metrics_path=Path(cfg.run.output_dir) / f"data_metrics_rank{dist_ctx.rank}.jsonl",
             metrics_interval_seconds=cfg.observability.data_metrics_interval_seconds,
             emit_metrics=cfg.observability.data_metrics_jsonl,
+            exclude_uris=exclude_uris,
         )
     else:
         data_iterator = PackedDataIterator(
@@ -251,11 +299,6 @@ def run_train(args: argparse.Namespace) -> None:
     model = wrap_model(model, cfg.distributed, dist_ctx)
     optimizer = build_optimizer(model, cfg.trainer.optimizer)
     scheduler = build_scheduler(optimizer, cfg.trainer.scheduler, max_tokens=cfg.trainer.max_tokens)
-    ckpt_manager = CheckpointManager(
-        cfg.run.output_dir,
-        keep_latest=cfg.checkpoint.keep_latest,
-        checkpoint_format=cfg.checkpoint.format,
-    )
     logger = Phase1RunLogger(cfg.run.output_dir)
     validation_callback = None
     if cfg.validation.enabled and cfg.validation.val_manifest is not None:
@@ -267,10 +310,14 @@ def run_train(args: argparse.Namespace) -> None:
             logger=logger,
             distributed=dist_ctx,
         )
-    resume_from = None if args.no_resume else args.resume_from
-    if resume_from is None and not args.no_resume:
-        latest = ckpt_manager.latest_checkpoint()
-        resume_from = str(latest) if latest else None
+    # Weights-only warm start (CPT): only when not resuming an existing run.
+    # resume_from / exclude_uris were already resolved before the data pipeline.
+    if resume_from is None and args.init_from:
+        ckpt_manager.load_model(args.init_from, model=model)
+        if dist_ctx.is_main:
+            print(f"[run.py] warm-started model weights from {args.init_from} (fresh optimizer/scheduler/step)", file=sys.stderr)
+            if logger:
+                logger.event("warm_start_init_from", path=str(args.init_from))
     trainer = Trainer(
         cfg=cfg,
         chain=chain,
@@ -285,6 +332,7 @@ def run_train(args: argparse.Namespace) -> None:
         logger=logger,
         distributed=dist_ctx,
         validation_callback=validation_callback,
+        init_from=dedup_source,
     )
     try:
         state = trainer.fit(resume_from=resume_from)
@@ -365,6 +413,8 @@ def _apply_train_overrides(cfg: Config, args: argparse.Namespace) -> Config:
         data["distributed"]["fsdp_use_orig_params"] = args.fsdp_use_orig_params
     if args.fsdp_sharding_strategy is not None:
         data["distributed"]["fsdp_sharding_strategy"] = args.fsdp_sharding_strategy
+    if args.ddp_init_sync is not None:
+        data["distributed"]["ddp_init_sync"] = args.ddp_init_sync
     if args.micro_batch_size is not None:
         data["trainer"]["micro_batch_size"] = args.micro_batch_size
     if args.global_batch_size is not None:
@@ -688,6 +738,8 @@ def _launch_torchrun(args: argparse.Namespace) -> None:
     passthrough = [
         "--resume-from",
         args.resume_from,
+        "--init-from",
+        args.init_from,
         "--run-name",
         args.run_name,
         "--output-dir",
@@ -712,6 +764,8 @@ def _launch_torchrun(args: argparse.Namespace) -> None:
         args.fsdp_use_orig_params,
         "--fsdp-sharding-strategy",
         args.fsdp_sharding_strategy,
+        "--ddp-init-sync",
+        args.ddp_init_sync,
         "--micro-batch-size",
         args.micro_batch_size,
         "--global-batch-size",

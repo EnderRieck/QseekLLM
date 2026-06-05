@@ -16,9 +16,9 @@ from llmtrain.data.pipeline import RecordPipeline
 from llmtrain.data.readers import ShardReader
 from llmtrain.interfaces import Batch, Record
 from llmtrain.models import build_model
-from llmtrain.training.config import TrainerConfig
+from llmtrain.training.config import SchedulerConfig, TrainerConfig
 from llmtrain.training.optim import build_optimizer
-from llmtrain.training.schedule import TokenCosineScheduler
+from llmtrain.training.schedule import TokenCosineScheduler, TokenWSDScheduler
 from llmtrain.training.trainer import Trainer
 from llmtrain.utils.config import Config, RunConfig
 from llmtrain.checkpointing.config import CheckpointConfig
@@ -480,6 +480,32 @@ def test_scheduler_decay_tokens_can_exceed_training_tokens(tmp_path):
     expected_scale = 0.1 + 0.9 * (0.5 * (1.0 + math.cos(math.pi * progress)))
     assert math.isclose(scheduler.get_lr(), 1.0e-3 * expected_scale)
     assert scheduler.get_lr() > 1.0e-3 * 0.1
+
+
+def test_wsd_scheduler_can_warmup_from_resume_lr():
+    param = torch.nn.Parameter(torch.zeros(()))
+    optimizer = torch.optim.AdamW([param], lr=3.0e-4)
+    cfg = SchedulerConfig(
+        type="wsd",
+        start_tokens=30_000_000_000,
+        warmup_tokens=200_000_000,
+        warmup_start_ratio=0.8,
+        stable_tokens=9_800_000_000,
+        decay_tokens=10_000_000_000,
+        min_lr_ratio=0.01,
+    )
+    scheduler = TokenWSDScheduler(optimizer, cfg, max_tokens=50_000_000_000)
+
+    scheduler.step(30_000_000_000)
+    assert math.isclose(scheduler.get_lr(), 3.0e-4 * 0.8)
+    scheduler.step(30_100_000_000)
+    assert math.isclose(scheduler.get_lr(), 3.0e-4 * 0.9)
+    scheduler.step(30_200_000_000)
+    assert math.isclose(scheduler.get_lr(), 3.0e-4)
+    scheduler.step(40_000_000_000)
+    assert math.isclose(scheduler.get_lr(), 3.0e-4)
+    scheduler.step(50_000_000_000)
+    assert math.isclose(scheduler.get_lr(), 3.0e-4 * 0.01)
 
 
 def test_trainer_heartbeat_is_separate_from_step_logging(tmp_path):

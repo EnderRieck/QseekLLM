@@ -50,8 +50,10 @@ class AsyncPackedDataIterator:
         metrics_path: str | Path | None = None,
         metrics_interval_seconds: int = 30,
         emit_metrics: bool = True,
+        exclude_uris: set[str] | None = None,
     ) -> None:
         self.manifest_path = Path(manifest_path)
+        self.exclude_uris = exclude_uris
         self.tokenizer_cfg = _dump_model(tokenizer_cfg)
         self.pipeline_cfg = _dump_model(pipeline_cfg)
         self.seq_len = seq_len
@@ -110,6 +112,7 @@ class AsyncPackedDataIterator:
                     stop,
                     worker_stats,
                     self._committed_worker_states.get(worker_id),
+                    self.exclude_uris,
                 ),
                 daemon=True,
             )
@@ -210,6 +213,7 @@ def _producer_main(
     stop: mp.Event,
     worker_stats: Any,
     resume_state: dict[str, Any] | None,
+    exclude_uris: set[str] | None = None,
 ) -> None:
     try:
         tokenizer = load_tokenizer(TokenizerConfig.model_validate(tokenizer_cfg))
@@ -227,6 +231,7 @@ def _producer_main(
             parquet_batch_size=parquet_batch_size,
             mixer_temperature=mixer_temperature,
             manifest_meta=manifest_meta_model,
+            exclude_uris=exclude_uris,
         )
         records = iter(stream)
         packed = PackedDataIterator(

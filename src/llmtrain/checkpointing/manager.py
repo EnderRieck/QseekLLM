@@ -9,14 +9,23 @@ import torch.distributed as dist
 
 try:
     import torch.distributed.checkpoint as dcp
-    from torch.distributed.checkpoint.state_dict import StateDictOptions, get_state_dict, set_state_dict
+    from torch.distributed.checkpoint.state_dict import (
+        StateDictOptions,
+        get_model_state_dict,
+        get_state_dict,
+        set_model_state_dict,
+        set_state_dict,
+    )
 except Exception:  # pragma: no cover - depends on torch build
     dcp = None
     StateDictOptions = None
     get_state_dict = None
     set_state_dict = None
+    get_model_state_dict = None
+    set_model_state_dict = None
 
 from llmtrain.checkpointing.io import load_rng_state, rng_state
+from llmtrain.distributed.env import checkpoint_barrier, checkpoint_process_group
 from llmtrain.distributed.wrap import unwrap_model
 from llmtrain.utils.config import SCHEMA_VERSION, Config
 
@@ -63,6 +72,7 @@ class CheckpointManager:
         metrics: dict[str, Any] | None = None,
         distributed: bool = False,
         is_main: bool = True,
+        init_from: str | None = None,
     ) -> Path:
         fmt = self.resolve_format(distributed=distributed)
         target = self.root / name
@@ -72,7 +82,7 @@ class CheckpointManager:
                 shutil.rmtree(tmp)
             tmp.mkdir(parents=True)
         if distributed:
-            dist.barrier()
+            checkpoint_barrier(barrier_dir=self.root / ".barriers", tag=f"{name}.prepare")
         if fmt == "dcp":
             self._save_dcp_state(tmp, model, optimizer)
         elif is_main:
@@ -80,7 +90,7 @@ class CheckpointManager:
         else:
             raise RuntimeError("torch checkpoint save should only be called by the main rank")
         if distributed:
-            dist.barrier()
+            checkpoint_barrier(barrier_dir=self.root / ".barriers", tag=f"{name}.state_saved")
         meta = {
             "schema_version": SCHEMA_VERSION,
             "checkpoint_format": fmt,
@@ -93,6 +103,10 @@ class CheckpointManager:
             "tokenizer": tokenizer_metadata,
             "manifest": manifest_metadata,
             "metrics": metrics or {},
+            # Warm-start source (--init-from), if any. Lets dedup recurse the init-from
+            # chain (consumed_shard_uris) and lets resume recover the dedup source
+            # without re-passing --init-from. None for a from-scratch run.
+            "init_from": init_from,
         }
         if is_main:
             torch.save(meta, tmp / "meta.pt")
@@ -103,7 +117,7 @@ class CheckpointManager:
             if name.startswith("latest_step_"):
                 self.cleanup_latest()
         if distributed:
-            dist.barrier()
+            checkpoint_barrier(barrier_dir=self.root / ".barriers", tag=f"{name}.complete")
         return target
 
     def load(
@@ -120,7 +134,7 @@ class CheckpointManager:
         fmt = self._format_from_meta(meta)
         param_group_options = _snapshot_optimizer_param_group_options(optimizer)
         if fmt == "dcp":
-            self._load_dcp_state(path, model, optimizer)
+            self._load_dcp(path, model, optimizer=optimizer)
         else:
             self._load_torch_state(path, model, optimizer)
         _restore_optimizer_param_group_options(optimizer, param_group_options)
@@ -143,7 +157,7 @@ class CheckpointManager:
             if (path / "state.pt").exists():
                 self._load_torch_model_state(path, model, strict=strict)
             else:
-                self._load_dcp_model_state(path, model, strict=strict)
+                self._load_dcp(path, model, strict=strict)
         else:
             self._load_torch_model_state(path, model, strict=strict)
         return meta
@@ -194,6 +208,7 @@ class CheckpointManager:
         dcp.save(
             {"model": model_state, "optimizer": optimizer_state},
             checkpoint_id=str(path / "dcp"),
+            process_group=checkpoint_process_group(),
         )
 
     @staticmethod
@@ -206,25 +221,55 @@ class CheckpointManager:
         optimizer.load_state_dict(loaded["optimizer"])
 
     @staticmethod
-    def _load_dcp_state(path: Path, model: torch.nn.Module, optimizer: torch.optim.Optimizer) -> None:
-        if dcp is None or get_state_dict is None or set_state_dict is None or StateDictOptions is None:
+    def _load_dcp(
+        path: Path,
+        model: torch.nn.Module,
+        optimizer: torch.optim.Optimizer | None = None,
+        *,
+        strict: bool = True,
+    ) -> None:
+        """Load model (and optionally optimizer) from a DCP checkpoint.
+
+        One code path for both entry points so their state-dict handling cannot drift:
+          - optimizer given -> full restore (--resume-from): model + optimizer.
+          - optimizer None  -> weights-only (--init-from warm start): model only,
+            fresh optimizer.
+        Both use the distributed-checkpoint state-dict API (get/set_state_dict and its
+        model-only variant get/set_model_state_dict), which returns the DTensor layout
+        matching how _save_dcp_state wrote it. The raw FSDP module.state_dict() would
+        instead give 1D flat LOCAL shards under shard_grad_op + use_orig_params and
+        fail with a size mismatch against the saved DTensor shapes.
+        """
+        if dcp is None or get_model_state_dict is None or set_model_state_dict is None or StateDictOptions is None:
             raise RuntimeError("DCP checkpoint load requested, but torch.distributed.checkpoint is unavailable")
-        if not (dist.is_available() and dist.is_initialized()):
-            raise RuntimeError("DCP training checkpoint load requires an initialized distributed process group")
+        if optimizer is not None and (get_state_dict is None or set_state_dict is None):
+            raise RuntimeError("DCP checkpoint load requested, but torch.distributed.checkpoint is unavailable")
         dcp_path = path / "dcp"
         if not dcp_path.exists():
             raise FileNotFoundError(f"Missing DCP checkpoint state under {path}")
-        options = StateDictOptions(full_state_dict=False, cpu_offload=False)
-        model_state, optimizer_state = get_state_dict(model, optimizer, options=options)
-        state = {"model": model_state, "optimizer": optimizer_state}
-        dcp.load(state, checkpoint_id=str(dcp_path))
-        set_state_dict(
-            model,
-            optimizer,
-            model_state_dict=state["model"],
-            optim_state_dict=state["optimizer"],
-            options=options,
-        )
+        initialized = dist.is_available() and dist.is_initialized()
+        if optimizer is not None and not initialized:
+            raise RuntimeError("DCP training checkpoint load requires an initialized distributed process group")
+        options = StateDictOptions(full_state_dict=False, cpu_offload=False, strict=strict)
+        if optimizer is None:
+            state = {"model": get_model_state_dict(model, options=options)}
+        else:
+            model_state, optimizer_state = get_state_dict(model, optimizer, options=options)
+            state = {"model": model_state, "optimizer": optimizer_state}
+        if initialized:
+            dcp.load(state, checkpoint_id=str(dcp_path), process_group=checkpoint_process_group())
+        else:
+            dcp.load(state, checkpoint_id=str(dcp_path), no_dist=True)
+        if optimizer is None:
+            set_model_state_dict(model, model_state_dict=state["model"], options=options)
+        else:
+            set_state_dict(
+                model,
+                optimizer,
+                model_state_dict=state["model"],
+                optim_state_dict=state["optimizer"],
+                options=options,
+            )
 
     @staticmethod
     def _load_torch_model_state(path: Path, model: torch.nn.Module, *, strict: bool = True) -> None:
@@ -234,20 +279,6 @@ class CheckpointManager:
             raise FileNotFoundError(f"Missing checkpoint model state under {path}")
         loaded = torch.load(state_path, map_location="cpu", weights_only=False)
         model_obj.load_state_dict(loaded["model"], strict=strict)
-
-    @staticmethod
-    def _load_dcp_model_state(path: Path, model: torch.nn.Module, *, strict: bool = True) -> None:
-        if dcp is None:
-            raise RuntimeError("DCP checkpoint load requested, but torch.distributed.checkpoint is unavailable")
-        dcp_path = path / "dcp"
-        if not dcp_path.exists():
-            raise FileNotFoundError(f"Missing DCP checkpoint state under {path}")
-        state = {"model": unwrap_model(model).state_dict()}
-        if dist.is_available() and dist.is_initialized():
-            dcp.load(state, checkpoint_id=str(dcp_path))
-        else:
-            dcp.load(state, checkpoint_id=str(dcp_path), no_dist=True)
-        unwrap_model(model).load_state_dict(state["model"], strict=strict)
 
 
 def _snapshot_optimizer_param_group_options(optimizer: torch.optim.Optimizer) -> list[dict[str, Any]]:

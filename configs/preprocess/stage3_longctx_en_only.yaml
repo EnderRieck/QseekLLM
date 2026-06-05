@@ -1,0 +1,55 @@
+# EN long-text diversity: RedPajama books + long CommonCrawl web (so EN long is
+# not only academic papers/peS2o). From yuyijiong/LongData-Corpus LongData_en.
+# Separate run; its manifest lines are appended to runs/longctx_pool/manifest.jsonl.
+extends:
+  - stage0_stream_preprocess.yaml
+
+run:
+  name: stream_preprocess_longctx_en
+  output_dir: /mnt/DataFlow/lz/proj/agentgroup/ziyi/llmTrain/runs/stream_preprocess_longctx_en
+  seed: 42
+
+data:
+  manifest_path: /mnt/DataFlow/lz/proj/agentgroup/ziyi/llmTrain/runs/stream_preprocess_longctx_en/manifest.jsonl
+
+preprocess:
+  writer:
+    output_dir: runs/stream_preprocess_longctx_en
+    rejected_path: runs/stream_preprocess_longctx_en/rejected.jsonl
+  dedup:
+    state_dir: runs/stream_preprocess_longctx_en/dedup_state
+  cleaning:
+    min_chars: 2000
+    max_chars: 8000000
+    normalize_unicode: true
+    normalize_whitespace: true
+    remove_boilerplate: true
+    min_alpha_or_cjk_ratio: 0.10
+    max_repeated_line_ratio: 0.45
+    max_control_char_ratio: 0.03
+  quality:
+    scorer: heuristic
+    min_score: 0.30
+  sources:
+    - name: redpajama_book
+      type: jsonl
+      domain: book
+      language: en
+      license: see_dataset_card
+      paths:
+        - /mnt/paper2any/ziyi/llmTrain/datasets/LongData-Corpus/extracted_en/redpajama_book.jsonl
+      text_field: text
+      id_field: doc_id
+      metadata_fields: ["source", "doc_id"]
+      weight: 0.5
+    - name: redpajama_cc
+      type: jsonl
+      domain: en
+      language: en
+      license: see_dataset_card
+      paths:
+        - /mnt/paper2any/ziyi/llmTrain/datasets/LongData-Corpus/extracted_en/redpajama_cc.jsonl
+      text_field: text
+      id_field: doc_id
+      metadata_fields: ["source", "doc_id"]
+      weight: 0.5

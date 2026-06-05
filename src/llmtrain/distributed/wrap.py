@@ -51,6 +51,7 @@ def _wrap_ddp(model: nn.Module, cfg: DistributedConfig, ctx: DistributedContext)
         device_ids=device_ids,
         output_device=ctx.local_rank if ctx.device.type == "cuda" else None,
         find_unused_parameters=cfg.ddp_find_unused_parameters,
+        init_sync=cfg.ddp_init_sync,
     )
 
 

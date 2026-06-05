@@ -1,0 +1,24 @@
+# Context-extension stage C: 16384 (final). Warm-start from stage B (8k):
+#   python -m llmtrain.cli.run --config configs/train/stage_ext_16k_1700m.yaml \
+#     --init-from runs/stage_ext_8k/checkpoints/<final milestone>
+# rope_theta=1e6 and base max_position_embeddings=40960 support 16384 natively;
+# no rope scaling needed. Activation checkpointing on for memory.
+extends:
+  - stage_ext_base_1700m.yaml
+
+run:
+  name: stage_ext_16k_1_7b
+  output_dir: runs/stage_ext_16k
+  seed: 42
+
+data:
+  packing:
+    seq_len: 16384
+
+model:
+  max_position_embeddings: 16384
+
+trainer:
+  # USER 2026-06-05: 3B for 16k (base is 2B). Smoke showed 16k mbs1 runs at ~78K tok/s
+  # (peak 49GB/64, no OOM, activation_ckpt off), so 3B ≈ 10.7h < the ~12h to 8pm.
+  max_tokens: 3_000_000_000

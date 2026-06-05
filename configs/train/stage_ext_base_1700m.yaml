@@ -1,0 +1,65 @@
+# Shared base for the 1.7B context-extension curriculum (4k -> 8k -> 16k).
+# Each concrete stage extends this + data/longctx_mixture + tokenizer + model,
+# and overrides only: run.name/output_dir, data.packing.seq_len,
+# model.max_position_embeddings. Warm-start is a CLI arg, not config.
+#
+# FULL pipeline order:  50B base -> cosmopedia CPT -> 8k -> 16k
+# (4k stage dropped: the cosmopedia CPT is already at seq_len 4096, so a separate
+#  4k long-context stage is redundant — go straight to 8k.)
+#   stage 8k:  --init-from runs/stage2_cosmopedia_cpt_1700m/checkpoints/<final milestone, ~milestone_001000000000>
+#   stage 16k: --init-from runs/stage_ext_8k/checkpoints/<final>
+# (cosmopedia CPT itself: --init-from runs/stage1_general/checkpoints/<final 50B milestone>)
+# Per stage budget: 3B tokens. Mixture: STEM-leaning long-context (see longctx_mixture).
+extends:
+  - ../data/longctx_mixture.yaml
+  - ../tokenizer/hf_byte_bpe_150k.yaml
+  - ../model/qwen_like_1_7b.yaml
+
+trainer:
+  micro_batch_size: 1
+  global_batch_size: 512
+  max_tokens: 2_000_000_000        # USER 2026-06: 2B/stage (8k+16k) -- 3+3 was ~28h (16k slow), 2+2 ~18h
+  max_steps: null
+  checkpoint_interval_steps: 50     # 16k stage is ~357 steps total at 3B
+  optimizer: {type: adamw, lr: 1.0e-4, betas: [0.9, 0.95], weight_decay: 0.1}
+  scheduler: {type: cosine, warmup_tokens: 50_000_000, min_lr_ratio: 0.1}
+  precision: bf16
+  grad_clip: 1.0
+
+checkpoint:
+  save_interval_minutes: 30
+  milestone_interval_tokens: 500_000_000
+  keep_latest: 3
+
+distributed:
+  backend: fsdp
+  # USER 2026-06: activation_checkpointing OFF -- 8k shard_grad_op smoke used only
+  # ~25GB/64GB, lots of headroom, so skip activation recompute for speed (also matches
+  # CPT, which had it off). NOTE: 16k attention activation is seq^2 = 4x 8k's, so if
+  # the 16k stage OOMs, override `activation_checkpointing: true` in stage_ext_16k.
+  activation_checkpointing: false
+  # shard_grad_op (ZeRO-2), matching CPT/stage1: params NOT sharded. Wins vs full_shard
+  # (ZeRO-3): no cross-sharding reshard on --init-from CPT (same DCP layout) + faster
+  # (fewer all-gathers). Full FSDP config mirrors CPT (use_orig_params/auto_wrap/
+  # prefetch) so DCP load is identical.
+  fsdp_sharding_strategy: shard_grad_op
+  fsdp_auto_wrap_policy: transformer_block
+  fsdp_use_orig_params: true
+  fsdp_forward_prefetch: true
+  fsdp_backward_prefetch: pre
+  fsdp_mixed_precision: true
+  profile_memory: true
+  profile_interval_steps: 50
+
+observability:
+  metrics_jsonl: true
+  events_jsonl: true
+  data_metrics_jsonl: true
+  heartbeat: true
+  console_interval_steps: 10
+  heartbeat_interval_seconds: 60
+  data_metrics_interval_seconds: 30
+  tensorboard: false
+  wandb: false
+  loss_spike_window: 10
+  loss_spike_sigma: 5.0

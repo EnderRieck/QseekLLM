@@ -18,7 +18,9 @@ class OptimizerConfig(BaseModel):
 
 class SchedulerConfig(BaseModel):
     type: Literal["cosine", "wsd"] = "cosine"
+    start_tokens: int = Field(0, ge=0)
     warmup_tokens: int = Field(1_000_000_000, ge=0)
+    warmup_start_ratio: float = Field(0.0, ge=0, le=1)
     decay_tokens: int | None = Field(None, gt=0)
     stable_tokens: int | None = Field(None, ge=0)
     min_lr_ratio: float = Field(0.1, ge=0, le=1)

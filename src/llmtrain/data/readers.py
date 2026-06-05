@@ -32,6 +32,7 @@ class ShardReader:
         source_filter: str | None = None,
         domain_filter: str | None = None,
         manifest_meta: ManifestMeta | None = None,
+        exclude_uris: set[str] | None = None,
     ) -> None:
         self.manifest_path = Path(manifest_path)
         self.meta = manifest_meta or validate_manifest(self.manifest_path, validate_shards=validate_hashes)
@@ -40,6 +41,10 @@ class ShardReader:
             all_shards = [shard for shard in all_shards if shard.source == source_filter]
         if domain_filter is not None:
             all_shards = [shard for shard in all_shards if shard.domain == domain_filter]
+        # Auto-dedup vs a warm-start source: drop shards a previous run consumed.
+        # Keyed on uri (the unique shard identifier; shard id is not unique).
+        if exclude_uris:
+            all_shards = [shard for shard in all_shards if shard.uri not in exclude_uris]
         self.shards = assigned_shards(all_shards, world_size, rank, num_workers, worker_id)
         self.source_filter = source_filter
         self.domain_filter = domain_filter

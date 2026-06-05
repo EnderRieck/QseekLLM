@@ -13,7 +13,7 @@ import torch.distributed as dist
 from torch import nn
 
 from llmtrain.checkpointing.manager import CheckpointManager
-from llmtrain.distributed.env import DistributedContext, barrier
+from llmtrain.distributed.env import DistributedContext, barrier, checkpoint_barrier, checkpoint_gather_object
 from llmtrain.interfaces import Batch
 from llmtrain.observability.callbacks import Phase1RunLogger
 from llmtrain.training.schedule import TokenCosineScheduler
@@ -38,9 +38,11 @@ class Trainer:
         logger: Phase1RunLogger | None = None,
         distributed: DistributedContext | None = None,
         validation_callback: Any | None = None,
+        init_from: str | None = None,
     ) -> None:
         self.cfg = cfg
         self.chain = chain
+        self.init_from = init_from
         self.model = model
         self.optimizer = optimizer
         self.scheduler = scheduler
@@ -146,9 +148,9 @@ class Trainer:
         distributed = self.distributed is not None and self.distributed.enabled
         checkpoint_format = self.checkpoint_manager.resolve_format(distributed=distributed)
         if distributed and checkpoint_format == "torch":
-            barrier()
+            checkpoint_barrier(barrier_dir=self.checkpoint_manager.root / ".barriers", tag=f"{name}.torch_prepare")
             if not self._is_main:
-                barrier()
+                checkpoint_barrier(barrier_dir=self.checkpoint_manager.root / ".barriers", tag=f"{name}.torch_complete")
                 return self.checkpoint_manager.root / name
         path = self.checkpoint_manager.save(
             name,
@@ -164,13 +166,14 @@ class Trainer:
             metrics=metrics,
             distributed=distributed and checkpoint_format == "dcp",
             is_main=self._is_main,
+            init_from=self.init_from,
         )
         if self._is_main:
             self._last_checkpoint_time = time.monotonic()
         if self._is_main and self.logger:
             self.logger.event("checkpoint_saved", path=str(path), global_step=self.state.global_step)
         if distributed and checkpoint_format == "torch":
-            barrier()
+            checkpoint_barrier(barrier_dir=self.checkpoint_manager.root / ".barriers", tag=f"{name}.torch_complete")
         return path
 
     def _checkpoint_data_state(self, distributed: bool) -> dict[str, Any]:
@@ -178,7 +181,13 @@ class Trainer:
         if not distributed or not (dist.is_available() and dist.is_initialized()):
             return local_state
         gathered: list[Any] | None = [None for _ in range(self.data_parallel_world_size)] if self._is_main else None
-        dist.gather_object(local_state, object_gather_list=gathered, dst=0)
+        checkpoint_gather_object(
+            local_state,
+            object_gather_list=gathered,
+            dst=0,
+            barrier_dir=self.checkpoint_manager.root / ".barriers",
+            tag=f"data_state_step_{self.state.global_step:08d}",
+        )
         if not self._is_main:
             return {}
         return {

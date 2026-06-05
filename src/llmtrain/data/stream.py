@@ -28,6 +28,7 @@ class TrainingRecordStream:
         parquet_batch_size: int = 8192,
         mixer_temperature: float = 1.0,
         manifest_meta: ManifestMeta | None = None,
+        exclude_uris: set[str] | None = None,
     ) -> None:
         self.manifest_path = Path(manifest_path)
         self.pipeline_cfg = PipelineConfig.model_validate(pipeline_cfg)
@@ -39,6 +40,7 @@ class TrainingRecordStream:
         self.shuffle_seed = shuffle_seed
         self.parquet_batch_size = parquet_batch_size
         self.mixer_temperature = mixer_temperature
+        self.exclude_uris = exclude_uris
         self.manifest_meta = manifest_meta or validate_manifest(self.manifest_path, validate_shards=validate_hashes)
         self._manifest_shards = load_manifest(self.manifest_path)
         self._sources = [DataSourceConfig.model_validate(source) for source in (sources or [])]
@@ -97,6 +99,7 @@ class TrainingRecordStream:
                 shuffle_seed=self.shuffle_seed,
                 parquet_batch_size=self.parquet_batch_size,
                 manifest_meta=self.manifest_meta,
+                exclude_uris=self.exclude_uris,
             )
             if self._loaded_state is not None:
                 self._reader.load_state_dict(self._loaded_state["reader"])
@@ -127,6 +130,7 @@ class TrainingRecordStream:
                 source_filter=source.source_filter,
                 domain_filter=source.domain,
                 manifest_meta=self.manifest_meta,
+                exclude_uris=self.exclude_uris,
             )
             if not reader.shards:
                 continue

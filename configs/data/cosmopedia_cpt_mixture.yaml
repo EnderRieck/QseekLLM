@@ -1,0 +1,54 @@
+# Cosmopedia CPT data mixture. PURPOSE: improve output STYLE / naturalness
+# (chinese-cosmopedia is clean, fluent, textbook-style synthetic text). cosmopedia
+# stays the largest single source (0.60, the style signal). The rest is a stronger
+# anti-forgetting REPLAY: zh real text (fineweb-edu-zh + cci3_hq, 0.10) so the model
+# doesn't drift to a purely synthetic zh distribution, plus EN/code/math raised to
+# 0.30 total (USER 2026-06-04: carve 0.10 off cosmopedia for zh real text, lift
+# EN+code+math to 0.30 to harden anti-forgetting). EN source is fineweb_edu (USER
+# 2026-06-04: swapped from dolma -> higher-quality edu-filtered English, better fit
+# for the CPT's output-quality goal).
+#
+# ANTI-DUPLICATION: every source pulled from train_340b (dolma/code/math/cci3_hq/
+# fineweb_edu_chinese) excludes the shards stage1 already consumed -- build_cpt_
+# manifest.sh filters out runs/cpt_pool/stage1_consumed_shard_ids.txt (reconstructed
+# from the stage1 checkpoint's reader state, see tools/stage1_consumed_shards.py).
+# cci3_hq / fineweb-edu-zh have no per-doc score after preprocessing, but both are
+# already curated high-quality subsets (CCI3-HQ / fineweb-edu v2.1), so we use the
+# whole (unconsumed) source rather than re-filtering by score.
+#
+# Build the merged manifest first:  bash tools/build_cpt_manifest.sh
+data:
+  manifest_path: /mnt/DataFlow/lz/proj/agentgroup/ziyi/llmTrain/runs/cpt_pool/manifest.jsonl
+  validate_hashes: false
+  sources:
+    - {name: chinese_cosmopedia,      domain: zh,   language: zh,    source_filter: chinese_cosmopedia,       weight: 0.60, target_ratio: 0.60, paths: []}
+    # ---- zh real-text replay (0.10, carved off cosmopedia) ----
+    - {name: fineweb_edu_chinese_v21, domain: zh,   language: zh,    source_filter: fineweb_edu_chinese_v21,  weight: 0.06, target_ratio: 0.06, paths: []}
+    - {name: cci3_hq,                 domain: zh,   language: zh,    source_filter: cci3_hq,                  weight: 0.04, target_ratio: 0.04, paths: []}
+    # ---- EN/code/math anti-forgetting replay (0.30 total) ----
+    - {name: fineweb_edu,             domain: en,   language: en,    source_filter: fineweb_edu,              weight: 0.12, target_ratio: 0.12, paths: []}
+    - {name: code_replay,             domain: code, language: multi, source_filter: the_stack_v1,            weight: 0.10, target_ratio: 0.10, paths: []}
+    - {name: proof_pile_2,            domain: math, language: multi, source_filter: proof_pile_2,            weight: 0.05, target_ratio: 0.05, paths: []}
+    - {name: openwebmath,             domain: math, language: en,    source_filter: openwebmath,             weight: 0.03, target_ratio: 0.03, paths: []}
+  reader:
+    world_size: 1
+    rank: 0
+    num_workers: 1
+    worker_id: 0
+    quarantine_threshold: 5
+    parquet_batch_size: 8192
+  pipeline:
+    min_chars: 1
+    max_chars: null
+    min_quality_score: null
+    normalize_whitespace: true
+  mixer:
+    temperature: 1.0
+    seed: 42
+  packing:
+    seq_len: 4096
+    batch_size: 1
+    async_tokenization: true
+    producer_workers: 16
+    queue_max_batches: 32
+  allowed_formats: ["jsonl", "parquet"]

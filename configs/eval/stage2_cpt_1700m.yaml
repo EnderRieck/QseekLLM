@@ -1,0 +1,40 @@
+# Eval config for the 1.7B cosmopedia-CPT model (continuation-style tasks, matching
+# the pretraining objective): Chinese WPLC + LAMBADA (English).
+#   python run.py eval --config configs/eval/stage2_cpt_1700m.yaml \
+#     --checkpoint runs/stage2_cosmopedia_cpt_1700m/checkpoints/milestone_001000000000 \
+#     --output-dir runs/eval_cpt_1700m --run-name cpt_1700m_1B --gpus all --batch-size 4
+run:
+  name: eval_cpt_1700m
+  output_dir: runs/eval
+  seed: 42
+
+model:
+  train_config: configs/train/stage2_cosmopedia_cpt_1700m.yaml   # source of model + tokenizer
+  checkpoint: latest                                             # overridden by --checkpoint
+
+runtime:
+  device: cuda
+  dtype: bf16
+  compile_model: false
+  allow_tokenizer_fallback: false
+
+datasets:
+  root_dir: eval/datasets
+  wplc_prepared_path: eval/datasets/chinese_wplc/dev.jsonl
+  offline: true
+
+harness:
+  include_path: eval/tasks
+  batch_size: 4
+  max_batch_size: null
+  limit: null
+  num_fewshot: 0
+  bootstrap_iters: 0
+  log_samples: true
+  cache_requests: true
+  use_cache: null
+  verbosity: INFO
+
+tasks:
+  - chinese_wplc
+  - lambada_openai

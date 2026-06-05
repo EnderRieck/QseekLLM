@@ -50,12 +50,17 @@ class TokenWSDScheduler:
     """Warmup-Stable-Decay scheduler.
 
     Three phases driven by consumed_tokens (peak LR = base_lr from optimizer):
-      1. Warmup [0, warmup_tokens):
+      1. Warmup [start_tokens, start_tokens + warmup_tokens):
          linear ramp 0 -> peak_lr
-      2. Stable [warmup_tokens, stable_end):
+      2. Stable [start_tokens + warmup_tokens, stable_end):
          hold peak_lr
       3. Decay [stable_end, max_tokens]:
          cosine decay peak_lr -> peak_lr * min_lr_ratio
+
+    `start_tokens` can be used when switching an existing run to WSD.
+    In that case `warmup_start_ratio` controls the LR scale at
+    start_tokens, so resume can warm up from the decayed LR instead of
+    jumping directly back to peak LR.
 
     `decay_tokens` controls the *length* of the decay phase, so
     stable_end = max_tokens - decay_tokens. If `stable_tokens` is also
@@ -67,23 +72,25 @@ class TokenWSDScheduler:
         self.optimizer = optimizer
         self.cfg = cfg
         self.max_tokens = int(max_tokens)
+        self.start_tokens = int(cfg.start_tokens)
         self.warmup_tokens = int(cfg.warmup_tokens)
+        self.warmup_start_ratio = float(cfg.warmup_start_ratio)
         decay_len = int(cfg.decay_tokens) if cfg.decay_tokens is not None else 0
         if decay_len <= 0:
             raise ValueError("WSD scheduler requires positive decay_tokens (length of decay phase)")
-        if self.warmup_tokens + decay_len > self.max_tokens:
+        if self.start_tokens + self.warmup_tokens + decay_len > self.max_tokens:
             raise ValueError(
-                f"warmup_tokens ({self.warmup_tokens}) + decay_tokens ({decay_len}) "
-                f"exceeds max_tokens ({self.max_tokens})"
+                f"start_tokens ({self.start_tokens}) + warmup_tokens ({self.warmup_tokens}) "
+                f"+ decay_tokens ({decay_len}) exceeds max_tokens ({self.max_tokens})"
             )
         self.decay_len = decay_len
         self.stable_end = self.max_tokens - decay_len
         if cfg.stable_tokens is not None:
-            expected = self.stable_end - self.warmup_tokens
+            expected = self.stable_end - self.start_tokens - self.warmup_tokens
             if int(cfg.stable_tokens) != expected:
                 raise ValueError(
                     f"stable_tokens ({cfg.stable_tokens}) inconsistent with derived "
-                    f"length ({expected}) = max_tokens - decay_tokens - warmup_tokens"
+                    f"length ({expected}) = max_tokens - decay_tokens - start_tokens - warmup_tokens"
                 )
         self.base_lrs = [group["lr"] for group in optimizer.param_groups]
         self.consumed_tokens = 0
@@ -111,8 +118,13 @@ class TokenWSDScheduler:
 
     def _scale(self) -> float:
         t = self.consumed_tokens
-        if self.warmup_tokens > 0 and t < self.warmup_tokens:
-            return max(1.0e-8, t / self.warmup_tokens)
+        if t < self.start_tokens:
+            return max(1.0e-8, self.warmup_start_ratio)
+        warmup_end = self.start_tokens + self.warmup_tokens
+        if self.warmup_tokens > 0 and t < warmup_end:
+            progress = (t - self.start_tokens) / self.warmup_tokens
+            scale = self.warmup_start_ratio + (1.0 - self.warmup_start_ratio) * progress
+            return max(1.0e-8, scale)
         if t < self.stable_end:
             return 1.0
         progress = min(1.0, max(0.0, (t - self.stable_end) / max(1, self.decay_len)))

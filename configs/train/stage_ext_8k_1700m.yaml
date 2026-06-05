@@ -1,0 +1,26 @@
+# Context-extension stage 1 (8192). First long-context stage — the 4k stage was
+# dropped (cosmopedia CPT is already seq_len 4096). Warm-start from the CPT output:
+#   python -m llmtrain.cli.run --config configs/train/stage_ext_8k_1700m.yaml \
+#     --init-from runs/stage2_cosmopedia_cpt_1700m/checkpoints/<final milestone>
+extends:
+  - stage_ext_base_1700m.yaml
+
+run:
+  name: stage_ext_8k_1_7b
+  output_dir: runs/stage_ext_8k
+  seed: 42
+
+data:
+  packing:
+    seq_len: 8192
+
+model:
+  max_position_embeddings: 8192
+
+trainer:
+  # mbs 2 (base default is 1): shard_grad_op + activation_ckpt off still leaves room
+  # at 8k -- smoke peak ~49GB/64 and ~87K tok/s (vs full_shard's 61K). gbs 512 ->
+  # grad_accum 32. mbs 4 OOMs (>64GB). MUST launch with
+  #   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  # or fragmentation pushes it to ~55GB and it OOMs. (16k will likely need mbs 1.)
+  micro_batch_size: 2

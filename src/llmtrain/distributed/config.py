@@ -25,6 +25,7 @@ class DistributedConfig(BaseModel):
     fsdp_forward_prefetch: bool = True
     fsdp_backward_prefetch: Literal["pre", "post", "none"] = "pre"
     ddp_find_unused_parameters: bool = False
+    ddp_init_sync: bool = True
     profile_memory: bool = True
     profile_interval_steps: PositiveInt = Field(10, description="Collect heavier profiler signals every N steps.")
 

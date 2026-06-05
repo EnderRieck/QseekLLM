@@ -1,0 +1,26 @@
+extends:
+  - stage0_stream_preprocess.yaml
+
+run:
+  name: stream_preprocess_chinese_cosmopedia
+  output_dir: /mnt/DataFlow/lz/proj/agentgroup/ziyi/llmTrain/runs/stream_preprocess_chinese_cosmopedia
+  seed: 42
+
+data:
+  manifest_path: /mnt/DataFlow/lz/proj/agentgroup/ziyi/llmTrain/runs/stream_preprocess_chinese_cosmopedia/manifest.jsonl
+
+preprocess:
+  sources:
+    - name: chinese_cosmopedia
+      type: remote_parquet
+      domain: zh
+      language: zh
+      license: apache-2.0
+      hf_repo_id: opencsg/chinese-cosmopedia
+      hf_revision: main
+      hf_include_patterns:
+        - "data/*.parquet"
+      text_field: text
+      id_field: null
+      metadata_fields: ["score", "source", "data_format"]
+      weight: 1.0

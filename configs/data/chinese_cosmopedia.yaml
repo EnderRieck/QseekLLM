@@ -1,0 +1,31 @@
+# Single-source data mixture: opencsg/chinese-cosmopedia (cleaned + exact-deduped).
+# Produced by tools/stream_preprocess.py -> runs/stream_preprocess_chinese_cosmopedia.
+# Real token count (hf_byte_bpe_150k) ~= 24.4B (audit: real/est ratio 0.772 over 31.63B bytes/4 est).
+data:
+  manifest_path: /mnt/DataFlow/lz/proj/agentgroup/ziyi/llmTrain/runs/stream_preprocess_chinese_cosmopedia/manifest.jsonl
+  sources:
+    - name: chinese_cosmopedia
+      domain: zh
+      language: zh
+      source_filter: chinese_cosmopedia
+      weight: 1.0
+      target_ratio: 1.0
+      paths: []
+  reader:
+    world_size: 1
+    rank: 0
+    num_workers: 1
+    worker_id: 0
+    quarantine_threshold: 5
+  pipeline:
+    min_chars: 1
+    max_chars: null
+    min_quality_score: null
+    normalize_whitespace: true
+  mixer:
+    temperature: 1.0
+    seed: 42
+  packing:
+    seq_len: 4096
+    batch_size: 1
+  allowed_formats: ["jsonl", "parquet"]

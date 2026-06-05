@@ -1,0 +1,98 @@
+# Long-context preprocess: clean + exact-dedup the long-document pool used for
+# the 4k -> 8k -> 16k context-extension curriculum.
+#
+# Sources (all normalized to JSONL {text, source, doc_id} beforehand):
+#   - peS2o s2orc  (EN academic full-text)     datasets/peS2o/data/v3/*.zst
+#   - webnovel_cn  (ZH whole-novel concat)      datasets/webnovel_cn/concat/*.jsonl
+#   - LongData_zh  (ZH curated >=16k-char docs) datasets/LongData-Corpus/extracted/*.jsonl
+#   - code         (long source files)          <<FILL once parquet path is known>>
+#
+# IMPORTANT vs the base preprocess: base max_chars=200000 (~50k tok) would REJECT
+# the long docs we specifically want. Raised to 8M so whole novels/books survive;
+# the training packer chunks them to the context window anyway.
+extends:
+  - stage0_stream_preprocess.yaml
+
+run:
+  name: stream_preprocess_longctx
+  output_dir: /mnt/DataFlow/lz/proj/agentgroup/ziyi/llmTrain/runs/stream_preprocess_longctx
+  seed: 42
+
+data:
+  manifest_path: /mnt/DataFlow/lz/proj/agentgroup/ziyi/llmTrain/runs/stream_preprocess_longctx/manifest.jsonl
+
+preprocess:
+  writer:
+    output_dir: runs/stream_preprocess_longctx
+    rejected_path: runs/stream_preprocess_longctx/rejected.jsonl
+  dedup:
+    state_dir: runs/stream_preprocess_longctx/dedup_state
+  cleaning:
+    min_chars: 2000          # long-doc pool: drop anything trivially short
+    max_chars: 8000000       # keep whole books/novels (base 200k would reject them)
+    normalize_unicode: true
+    normalize_whitespace: true
+    remove_boilerplate: true
+    min_alpha_or_cjk_ratio: 0.10
+    max_repeated_line_ratio: 0.45
+    max_control_char_ratio: 0.03
+  quality:
+    scorer: heuristic
+    min_score: 0.30          # sources are already length/quality filtered upstream; avoid over-pruning
+  sources:
+    # ---- English long: peS2o s2orc full-text (.zst auto-detected by magic bytes) ----
+    - name: pes2o_s2orc
+      type: jsonl
+      domain: paper
+      language: en
+      license: see_dataset_card
+      paths:
+        - /mnt/paper2any/ziyi/llmTrain/datasets/peS2o/data/v3/*.zst
+      text_field: text
+      id_field: id
+      metadata_fields: ["source", "version", "created"]
+      exclude_metadata_values:
+        source: ["pes2o/s2ag"]   # keep full-text only (these shards are all s2orc anyway)
+      weight: 0.30
+
+    # ---- Chinese long: whole-novel concatenations ----
+    - name: webnovel_cn
+      type: jsonl
+      domain: fiction
+      language: zh
+      license: see_dataset_card
+      paths:
+        - /mnt/paper2any/ziyi/llmTrain/datasets/webnovel_cn/concat/*.jsonl
+      text_field: text
+      id_field: doc_id
+      metadata_fields: ["source", "title", "n_chapters", "part"]
+      weight: 0.25
+
+    # ---- Chinese long: yuyijiong/LongData-Corpus zh subset (8 sources, all >=16k char) ----
+    # cci.jsonl + wiki_zh.jsonl moved to extracted/_excluded/ (stage1 already used
+    # cci3_hq + zhwiki -> avoid duplication). The single-level glob excludes them.
+    - name: longdata_zh
+      type: jsonl
+      domain: mixed
+      language: zh
+      license: see_dataset_card
+      paths:
+        - /mnt/paper2any/ziyi/llmTrain/datasets/LongData-Corpus/extracted/*.jsonl
+      text_field: text
+      id_field: doc_id
+      metadata_fields: ["source", "doc_id"]
+      weight: 0.30
+
+    # ---- Code: long source files (TODO: fill path from user's parquet) ----
+    # - name: code_long
+    #   enabled: true
+    #   type: parquet
+    #   domain: code
+    #   language: multi
+    #   license: see_dataset_card
+    #   paths:
+    #     - <<USER CODE PARQUET GLOB>>
+    #   text_field: content        # the_stack: content / codenet: Text
+    #   id_field: null
+    #   metadata_fields: ["lang", "ext", "size"]
+    #   weight: 0.15

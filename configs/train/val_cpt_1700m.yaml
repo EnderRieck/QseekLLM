@@ -1,0 +1,34 @@
+# One-shot validation of the CPT model on the training val_60m set (val loss/PPL),
+# the same held-out set monitored during stage1. There's no standalone "validate"
+# subcommand, so we reuse train with validation.run_at_start: true + max_steps 1 --
+# validation runs at step 0 (before any weight update), so the reported loss/PPL is
+# the CPT checkpoint's. --init-from loads CPT weights.
+#   export DATA_DIR=/mnt/DataFlow/lz/proj/agentgroup/ziyi/llmTrain/runs
+#   conda run -n llmtrain python run.py train --config configs/train/val_cpt_1700m.yaml \
+#     --device cuda --gpus all \
+#     --init-from runs/stage2_cosmopedia_cpt_1700m/checkpoints/milestone_001000000000
+extends:
+  - stage2_cosmopedia_cpt_1700m.yaml
+
+run:
+  name: val_cpt_1700m
+  output_dir: runs/val_cpt_1700m
+  seed: 42
+
+trainer:
+  max_steps: 1
+
+validation:
+  enabled: true
+  val_manifest: ${DATA_DIR}/val_60m/manifest.jsonl
+  interval_tokens: 999_000_000_000   # don't re-run mid "training"
+  max_tokens_per_source: 2_000_000
+  seq_len: 4096                       # CPT context
+  batch_size: 4
+  dtype: bf16
+  run_at_start: true
+
+checkpoint:
+  milestone_interval_tokens: 999_000_000_000
+  save_interval_minutes: 9999
+  keep_latest: 1
