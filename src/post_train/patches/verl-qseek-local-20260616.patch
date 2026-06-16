@@ -1,0 +1,1886 @@
+diff --git a/verl/checkpoint_engine/base.py b/verl/checkpoint_engine/base.py
+index 73608f20..84ddb9cb 100644
+--- a/verl/checkpoint_engine/base.py
++++ b/verl/checkpoint_engine/base.py
+@@ -12,6 +12,8 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ import asyncio
++import os
++import time
+ from abc import ABC, abstractmethod
+ from dataclasses import dataclass
+ from typing import Any, AsyncGenerator, Generator
+@@ -479,39 +481,121 @@ class CheckpointEngineManager:
+             ray.get(self.trainer.update_weights(global_steps=global_steps, mode=self.backend))
+             return
+ 
++        sync_start = time.time()
++        print(
++            f"[checkpoint-manager] update_weights start: "
++            f"backend={self.backend}, trainer_world={self.trainer.world_size}, "
++            f"replicas={len(self.replicas)}, global_steps={global_steps}"
++        )
++
+         # 1. abort and save all unfinished requests for partial rollout
++        stage_start = time.time()
+         await self.abort_replicas()
++        print(f"[checkpoint-manager] abort_replicas done: {time.time() - stage_start:.2f}s")
+ 
+         # 2. create a temporay worker group for all replicas
++        stage_start = time.time()
+         workers = []
+         for replica in self.replicas:
+             workers.extend(replica.workers)
+         rollout = RayWorkerGroup(worker_handles=workers, ray_cls_with_init=RayClassWithInitArgs(cls=_worker_cls))
+         trainer = self.trainer
++        print(
++            f"[checkpoint-manager] temporary rollout worker group ready: "
++            f"world={rollout.world_size}, {time.time() - stage_start:.2f}s"
++        )
+ 
+         # 3. release kv_cache before weight sync (weights stay in place)
++        stage_start = time.time()
+         await self.release_kv_cache_replicas()
++        print(f"[checkpoint-manager] release_kv_cache_replicas done: {time.time() - stage_start:.2f}s")
++
++        serial_rollout_sync = len(self.replicas) > 1 and os.environ.get(
++            "VERL_SERIAL_ROLLOUT_WEIGHT_SYNC", "0"
++        ).lower() in {"1", "true", "yes", "on"}
++        if serial_rollout_sync:
++            serial_start = time.time()
++            print(
++                f"[checkpoint-manager] serial rollout weight sync enabled: "
++                f"replicas={len(self.replicas)}"
++            )
++            for replica_idx, replica in enumerate(self.replicas):
++                replica_start = time.time()
++                stage_start = time.time()
++                rollout = RayWorkerGroup(
++                    worker_handles=replica.workers,
++                    ray_cls_with_init=RayClassWithInitArgs(cls=_worker_cls),
++                )
++                trainer = self.trainer
++                print(
++                    f"[checkpoint-manager] serial replica {replica_idx} temporary rollout worker group ready: "
++                    f"world={rollout.world_size}, {time.time() - stage_start:.2f}s"
++                )
++
++                stage_start = time.time()
++                self.build_process_group(rollout)
++                print(
++                    f"[checkpoint-manager] serial replica {replica_idx} build_process_group done: "
++                    f"{time.time() - stage_start:.2f}s"
++                )
++
++                stage_start = time.time()
++                ray.get(
++                    trainer.update_weights(global_steps=global_steps, mode=self.backend)
++                    + rollout.update_weights(global_steps=global_steps)
++                )
++                print(
++                    f"[checkpoint-manager] serial replica {replica_idx} transfer/load weights done: "
++                    f"{time.time() - stage_start:.2f}s"
++                )
++
++                stage_start = time.time()
++                ray.get(
++                    trainer.execute_checkpoint_engine(["finalize"] * trainer.world_size)
++                    + rollout.execute_checkpoint_engine(["finalize"] * rollout.world_size)
++                )
++                print(
++                    f"[checkpoint-manager] serial replica {replica_idx} finalize done: "
++                    f"{time.time() - stage_start:.2f}s; replica_total={time.time() - replica_start:.2f}s"
++                )
++            print(
++                f"[checkpoint-manager] serial transfer/load all replicas done: "
++                f"{time.time() - serial_start:.2f}s"
++            )
++        else:
++            # 4. build process group
++            stage_start = time.time()
++            self.build_process_group(rollout)
++            print(f"[checkpoint-manager] build_process_group done: {time.time() - stage_start:.2f}s")
++
++            # 5. update weights of all workers
++            stage_start = time.time()
++            ray.get(
++                trainer.update_weights(global_steps=global_steps, mode=self.backend)
++                + rollout.update_weights(global_steps=global_steps)
++            )
++            print(f"[checkpoint-manager] transfer/load weights done: {time.time() - stage_start:.2f}s")
+ 
+-        # 4. build process group
+-        self.build_process_group(rollout)
+-
+-        # 5. update weights of all workers
+-        ray.get(
+-            trainer.update_weights(global_steps=global_steps, mode=self.backend)
+-            + rollout.update_weights(global_steps=global_steps)
+-        )
+-
+-        # 6. finalize all workers
+-        ray.get(
+-            trainer.execute_checkpoint_engine(["finalize"] * trainer.world_size)
+-            + rollout.execute_checkpoint_engine(["finalize"] * rollout.world_size)
+-        )
++            # 6. finalize all workers
++            stage_start = time.time()
++            ray.get(
++                trainer.execute_checkpoint_engine(["finalize"] * trainer.world_size)
++                + rollout.execute_checkpoint_engine(["finalize"] * rollout.world_size)
++            )
++            print(f"[checkpoint-manager] finalize done: {time.time() - stage_start:.2f}s")
+ 
+         # 7. restore kv_cache after weight sync
++        stage_start = time.time()
+         await self.resume_kv_cache_replicas()
++        print(f"[checkpoint-manager] resume_kv_cache_replicas done: {time.time() - stage_start:.2f}s")
+ 
+         # 8. resume all unfinished requests for partial rollout
++        stage_start = time.time()
+         await self.resume_generation_replicas()
++        print(
++            f"[checkpoint-manager] resume_generation_replicas done: {time.time() - stage_start:.2f}s; "
++            f"total={time.time() - sync_start:.2f}s"
++        )
+ 
+ 
+ async def split_weight_chunks(
+diff --git a/verl/checkpoint_engine/nccl_checkpoint_engine.py b/verl/checkpoint_engine/nccl_checkpoint_engine.py
+index 5b496f8f..5b24b683 100644
+--- a/verl/checkpoint_engine/nccl_checkpoint_engine.py
++++ b/verl/checkpoint_engine/nccl_checkpoint_engine.py
+@@ -40,10 +40,20 @@ logger = logging.getLogger(__name__)
+ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+ 
+ 
++def _env_flag(name: str, default: str = "0") -> bool:
++    return os.environ.get(name, default).lower() in {"1", "true", "yes", "on"}
++
++
++def _trace_nccl_weight(rank: int | None, message: str):
++    if _env_flag("VERL_NCCL_TRACE_WEIGHTS"):
++        print(f"[nccl-checkpoint-trace] rank={rank} {message}", flush=True)
++
++
+ @dataclass
+ class MasterMetadata:
+     zmq_ip: str
+     zmq_port: int
++    zmq_sync_port: int | None = None
+ 
+ 
+ class BroadcastOperation:
+@@ -77,17 +87,31 @@ class BroadcastOperation:
+         loop = asyncio.get_running_loop()
+         self._task = loop.run_in_executor(None, self._run)
+ 
++    def _trace(self, message: str):
++        _trace_nccl_weight(self.rank, message)
++
+     def _run(self):
+         # broadcast tensor meta via zeromq PUB/SUB
+         if self.rank == 0:
++            self._trace(f"send metadata start: is_last={self.metadata.get('is_last')}")
+             self.socket.send_string(self.topic, flags=zmq.SNDMORE)
+             self.socket.send_pyobj(self.metadata)
++            self._trace("send metadata done")
+         else:
++            self._trace("recv metadata start")
+             self.socket.recv_string()
++            self._trace("recv metadata topic done")
+             self.metadata = self.socket.recv_pyobj()
++            self._trace(f"recv metadata done: is_last={self.metadata.get('is_last')}")
+ 
+         # broadcast tensor via NCCL
++        self._trace("broadcast start")
+         collective.broadcast(self.bucket, src_rank=0, group_name=self.group_name)
++        if isinstance(self.bucket, cp.ndarray):
++            cp.cuda.runtime.deviceSynchronize()
++        else:
++            torch.cuda.synchronize()
++        self._trace("broadcast done")
+ 
+     async def wait_for_complete(self) -> dict[str, TensorMeta]:
+         """Wait for the broadcast operation to complete.
+@@ -120,10 +144,13 @@ class NCCLCheckpointEngine(CheckpointEngine):
+         is_master: bool = False,
+         rollout_dtype: torch.dtype = torch.bfloat16,
+     ) -> None:
++        if _env_flag("VERL_NCCL_REBUILD_GROUP"):
++            rebuild_group = True
+         self.bucket_size = bucket_size
+         self.group_name = group_name
+         self.rebuild_group = rebuild_group
+         self.rollout_dtype = rollout_dtype
++        self.master_torch_buffer = _env_flag("VERL_NCCL_MASTER_TORCH_BUFFER")
+ 
+         # start zeromq server for broadcasting bucket tensor metadata
+         self.is_master = is_master
+@@ -134,17 +161,25 @@ class NCCLCheckpointEngine(CheckpointEngine):
+     def prepare(self) -> MasterMetadata:
+         # For master process, use cupy instead of torch to avoid memory register error
+         # when `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`.
+-        if self.is_master:
++        if self.is_master and not self.master_torch_buffer:
+             self.send_buf = cp.zeros(self.bucket_size, dtype=cp.uint8)
+             self.recv_buf = cp.zeros(self.bucket_size, dtype=cp.uint8)
+         else:
+             self.send_buf = torch.zeros(self.bucket_size, dtype=torch.uint8, device="cuda")
+             self.recv_buf = torch.zeros(self.bucket_size, dtype=torch.uint8, device="cuda")
+ 
+-        return MasterMetadata(zmq_ip=self.ip, zmq_port=self.listen_port) if self.is_master else None
++        return (
++            MasterMetadata(zmq_ip=self.ip, zmq_port=self.listen_port, zmq_sync_port=self.sync_listen_port)
++            if self.is_master
++            else None
++        )
+ 
+     def finalize(self):
+         """Destroy the NCCL process group if rebuild_group is True."""
++        if not self.is_master and getattr(self, "socket", None) is not None:
++            self.socket.close(linger=0)
++            self.socket = None
++
+         if self.rebuild_group:
+             if self.rank >= 0:
+                 collective.destroy_collective_group(self.group_name)
+@@ -173,8 +208,9 @@ class NCCLCheckpointEngine(CheckpointEngine):
+     def _start_zmq_server(self):
+         self.ip = ray.util.get_node_ip_address().strip("[]")
+         self.listen_port, _ = get_free_port(self.ip)
++        self.sync_listen_port, _ = get_free_port(self.ip)
+ 
+-        context = zmq.Context()
++        context = zmq.Context.instance()
+         self.socket = context.socket(zmq.PUB)
+         if is_valid_ipv6_address(self.ip):
+             address = f"tcp://[{self.ip}]:{self.listen_port}"
+@@ -184,9 +220,17 @@ class NCCLCheckpointEngine(CheckpointEngine):
+ 
+         self.socket.bind(address)
+ 
++        self.sync_socket = context.socket(zmq.REP)
++        if is_valid_ipv6_address(self.ip):
++            sync_address = f"tcp://[{self.ip}]:{self.sync_listen_port}"
++            self.sync_socket.setsockopt(zmq.IPV6, 1)
++        else:
++            sync_address = f"tcp://{self.ip}:{self.sync_listen_port}"
++        self.sync_socket.bind(sync_address)
++
+     def _connect_zmq_client(self, metadata: MasterMetadata):
+         assert not self.is_master, "Master process should not connect to other processes."
+-        context = zmq.Context()
++        context = zmq.Context.instance()
+         self.socket = context.socket(zmq.SUB)
+         if is_valid_ipv6_address(metadata.zmq_ip):
+             address = f"tcp://[{metadata.zmq_ip}]:{metadata.zmq_port}"
+@@ -196,6 +240,27 @@ class NCCLCheckpointEngine(CheckpointEngine):
+ 
+         self.socket.connect(address)
+         self.socket.setsockopt_string(zmq.SUBSCRIBE, self.topic)
++        if metadata.zmq_sync_port is not None:
++            sync_socket = context.socket(zmq.REQ)
++            if is_valid_ipv6_address(metadata.zmq_ip):
++                sync_address = f"tcp://[{metadata.zmq_ip}]:{metadata.zmq_sync_port}"
++                sync_socket.setsockopt(zmq.IPV6, 1)
++            else:
++                sync_address = f"tcp://{metadata.zmq_ip}:{metadata.zmq_sync_port}"
++            sync_socket.connect(sync_address)
++            sync_socket.send(b"READY")
++            sync_socket.recv()
++            sync_socket.close(linger=0)
++
++    def _wait_zmq_clients(self, num_clients: int):
++        if not self.is_master or num_clients <= 0:
++            return
++        for _ in range(num_clients):
++            self.sync_socket.recv()
++            self.sync_socket.send(b"ACK")
++        delay_s = float(os.environ.get("VERL_NCCL_ZMQ_SYNC_DELAY", "0.05"))
++        if delay_s > 0:
++            time.sleep(delay_s)
+ 
+     def init_process_group(self, rank: int, world_size: int, master_metadata: MasterMetadata):
+         """Initialize the NCCL process group.
+@@ -222,6 +287,8 @@ class NCCLCheckpointEngine(CheckpointEngine):
+ 
+         if self.rank > 0:
+             self._connect_zmq_client(master_metadata)
++        elif self.rank == 0:
++            self._wait_zmq_clients(world_size - 1)
+         collective.barrier(self.group_name)
+ 
+         logger.info(f"init_process_group rank: {self.rank}, world_size: {self.world_size}")
+@@ -238,11 +305,14 @@ class NCCLCheckpointEngine(CheckpointEngine):
+             weights: A generator that yields the name of the weight tensor and the tensor itself.
+         """
+         assert self.rank <= 0, "Trainer workers other than rank 0 should not send weights."
++        _trace_nccl_weight(self.rank, f"send_weights enter: step={global_steps}, bucket_size={self.bucket_size}")
+ 
+         # For trainer rank other than 0, consume weights without sending.
+         if self.rank < 0:
++            _trace_nccl_weight(self.rank, "send_weights nonzero trainer rank consume start")
+             for name, weight in weights:
+                 pass
++            _trace_nccl_weight(self.rank, "send_weights nonzero trainer rank consume done")
+             return
+ 
+         send_buf, recv_buf = self.send_buf, self.recv_buf
+@@ -251,15 +321,40 @@ class NCCLCheckpointEngine(CheckpointEngine):
+         start_time = time.time()
+         bucket_meta: dict[str, TensorMeta] = {}
+         offset = 0
++        chunk_count = 0
++        tensor_count = 0
++        last_tensor_name = None
++        _trace_nccl_weight(self.rank, "split_weight_chunks loop start")
+         async for tensor_meta, chunk in split_weight_chunks(weights, self.bucket_size):
++            chunk_count += 1
++            if tensor_meta.name != last_tensor_name:
++                tensor_count += 1
++                last_tensor_name = tensor_meta.name
++                if tensor_count <= 5 or tensor_count % 20 == 0:
++                    _trace_nccl_weight(
++                        self.rank,
++                        "new tensor chunk: "
++                        f"tensor_count={tensor_count}, name={tensor_meta.name}, "
++                        f"shape={tuple(tensor_meta.shape)}, dtype={tensor_meta.dtype}, "
++                        f"nbytes={tensor_meta.shape.numel() * tensor_meta.dtype.itemsize}",
++                    )
++            if chunk_count == 1:
++                _trace_nccl_weight(self.rank, "first chunk received from split_weight_chunks")
+             # fill the tensor bucket
+             if offset + tensor_meta.chunk_size > self.bucket_size:
++                _trace_nccl_weight(
++                    self.rank,
++                    f"bucket full: chunks={chunk_count}, tensors={tensor_count}, bytes={offset}, synchronize start",
++                )
+                 torch.cuda.synchronize()
+ 
+                 # wait previous broadcast op finish
+                 if broadcast_op is not None:
++                    _trace_nccl_weight(self.rank, "previous broadcast wait start")
+                     await broadcast_op.wait_for_complete()
++                    _trace_nccl_weight(self.rank, "previous broadcast wait done")
+ 
++                _trace_nccl_weight(self.rank, f"launch broadcast bucket: tensors={len(bucket_meta)}, is_last=False")
+                 broadcast_op = BroadcastOperation(
+                     rank=self.rank,
+                     group_name=self.group_name,
+@@ -279,14 +374,33 @@ class NCCLCheckpointEngine(CheckpointEngine):
+ 
+             tensor_meta.offset = offset
+             bucket_meta[tensor_meta.name] = tensor_meta
+-            send_buf[offset : offset + tensor_meta.chunk_size] = cp.asarray(chunk)
++            copy_start = time.time()
++            if isinstance(send_buf, cp.ndarray):
++                send_buf[offset : offset + tensor_meta.chunk_size] = cp.asarray(chunk)
++            else:
++                send_buf[offset : offset + tensor_meta.chunk_size].copy_(chunk, non_blocking=True)
++            copy_cost = time.time() - copy_start
++            if chunk_count == 1 or copy_cost > 1.0:
++                _trace_nccl_weight(
++                    self.rank,
++                    f"chunk copy done: chunk={chunk_count}, name={tensor_meta.name}, "
++                    f"bytes={tensor_meta.chunk_size}, copy_s={copy_cost:.2f}",
++                )
+             offset += tensor_meta.chunk_size
+ 
+         # broadcast last bucket
++        _trace_nccl_weight(
++            self.rank,
++            f"split loop done: chunks={chunk_count}, tensors={tensor_count}, final_bucket_bytes={offset}",
++        )
++        _trace_nccl_weight(self.rank, "final synchronize start")
+         torch.cuda.synchronize()
+         if broadcast_op is not None:
++            _trace_nccl_weight(self.rank, "final previous broadcast wait start")
+             await broadcast_op.wait_for_complete()
++            _trace_nccl_weight(self.rank, "final previous broadcast wait done")
+ 
++        _trace_nccl_weight(self.rank, f"launch final broadcast bucket: tensors={len(bucket_meta)}, is_last=True")
+         broadcast_op = BroadcastOperation(
+             rank=self.rank,
+             group_name=self.group_name,
+diff --git a/verl/experimental/fully_async_policy/detach_utils.py b/verl/experimental/fully_async_policy/detach_utils.py
+index f96ad910..9c80a460 100644
+--- a/verl/experimental/fully_async_policy/detach_utils.py
++++ b/verl/experimental/fully_async_policy/detach_utils.py
+@@ -73,7 +73,7 @@ def prepare_single_generation_data(batch_dict, config) -> DataProto:
+ 
+ def addition_process(output: DataProto):
+     """collect metirics"""
+-    metrics = output.meta_info.pop("metrics")  # List[Dict[str, str]]
++    metrics = output.meta_info.get("metrics", [])  # List[Dict[str, str]]
+     processing_times_list = [item["generate_sequences"] for item in metrics]
+     tool_calls_times_list = [item["tool_calls"] for item in metrics]
+     output.non_tensor_batch["processing_times"] = processing_times_list
+diff --git a/verl/experimental/fully_async_policy/fully_async_rollouter.py b/verl/experimental/fully_async_policy/fully_async_rollouter.py
+index 1eb70754..d05cb2aa 100644
+--- a/verl/experimental/fully_async_policy/fully_async_rollouter.py
++++ b/verl/experimental/fully_async_policy/fully_async_rollouter.py
+@@ -609,6 +609,40 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
+             val_metrics: dict = self._validate()
+         return timing_raw | val_metrics
+ 
++    async def pause_for_eval(self, drain_timeout_s: float = 180.0):
++        """Pause training-rollout generation so the vLLM engines are free for validation.
++
++        Reuses the same ``paused`` / ``_resume_event`` machinery as weight-sync: the
++        processor worker drains in-flight tasks and blocks on the resume event. We then
++        wait (bounded by ``drain_timeout_s``) for in-flight tasks to drain so held-out
++        eval does not contend with training sampling. Never blocks forever.
++        """
++        async with self.lock:
++            self.paused = True
++            self._resume_event.clear()
++        deadline = time.time() + drain_timeout_s
++        while time.time() < deadline:
++            async with self.lock:
++                remaining = len(self.active_tasks)
++            if remaining == 0:
++                break
++            await asyncio.sleep(0.5)
++        async with self.lock:
++            remaining = len(self.active_tasks)
++        print(
++            "[FullyAsyncRollouter][Eval] paused sampling for validation, "
++            f"in-flight tasks remaining={remaining}"
++        )
++        return {"fully_async/eval/drain_remaining": float(remaining)}
++
++    async def resume_after_eval(self):
++        """Resume training-rollout generation after validation finishes."""
++        async with self.lock:
++            self.paused = False
++            self._resume_event.set()
++        print("[FullyAsyncRollouter][Eval] resumed sampling after validation")
++        return {}
++
+     async def save_checkpoint(self, local_global_step_folder: str):
+         # WARNING!: Due to the asynchronous nature, there are some in-flight samples
+         # (pending/cancel/result queue and message queue).
+@@ -804,6 +838,7 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
+             config=self.config,
+             worker_group=self.get_hybrid_worker_group(),
+         )
++        await self._log_rollout_visible_devices()
+         self.async_rollout_manager = await FullyAsyncAgentLoopManager.create(
+             config=self.config,
+             llm_client=self.llm_server_manager.get_client(client_cls=FullyAsyncLLMServerClient),
+@@ -811,6 +846,16 @@ class FullyAsyncRollouter(SeparateRayPPOTrainer):
+             teacher_client=self.teacher_model_manager.get_client() if self.teacher_model_manager else None,
+         )
+ 
++    async def _log_rollout_visible_devices(self):
++        try:
++            workers = []
++            for replica in self.llm_server_manager.get_replicas():
++                workers.extend(replica.workers)
++            visible = await asyncio.gather(*[worker.get_cuda_visible_devices.remote() for worker in workers])
++            print(f"[FullyAsyncRollouter] rollout CUDA_VISIBLE_DEVICES={visible}")
++        except Exception as exc:
++            print(f"[FullyAsyncRollouter] failed to query rollout CUDA_VISIBLE_DEVICES: {exc}")
++
+     # Add samples to the pending_queue
+     async def _feed_samples(self):
+         continuous_iterator = self._create_continuous_iterator()
+diff --git a/verl/experimental/fully_async_policy/fully_async_trainer.py b/verl/experimental/fully_async_policy/fully_async_trainer.py
+index 5d5f4ebf..4c526fe3 100644
+--- a/verl/experimental/fully_async_policy/fully_async_trainer.py
++++ b/verl/experimental/fully_async_policy/fully_async_trainer.py
+@@ -13,9 +13,11 @@
+ # limitations under the License.
+ 
+ import asyncio
++import json
+ import logging
+ import os
+ import time
++from dataclasses import dataclass
+ from datetime import datetime
+ from typing import Any
+ 
+@@ -27,6 +29,7 @@ from verl import DataProto
+ from verl.checkpoint_engine import CheckpointEngineManager
+ from verl.experimental.fully_async_policy.detach_utils import (
+     MetricsAggregator,
++    RolloutSample,
+     assemble_batch_from_rollout_samples,
+ )
+ from verl.experimental.fully_async_policy.message_queue import MessageQueueClient
+@@ -35,10 +38,12 @@ from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
+ from verl.trainer.ppo import core_algos
+ from verl.trainer.ppo.ray_trainer import ResourcePoolManager
+ from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
++from verl.utils import tensordict_utils as tu
+ from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
+ from verl.utils.config import omega_conf_to_dataclass
+ from verl.utils.debug import marked_timer
+ from verl.utils.tracking import Tracking
++from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -49,6 +54,88 @@ class TrainingStopException(Exception):
+     pass
+ 
+ 
++@dataclass
++class RefLogProbFuture:
++    future: asyncio.Future
++    submitted_at: float
++    batch_size: int
++
++
++@dataclass
++class PrefetchedBatch:
++    batch: DataProto | None
++    timing_raw: dict[str, float]
++    metrics: dict[str, Any]
++    ref_future: RefLogProbFuture | None
++
++
++@dataclass
++class RefReadySample:
++    rollout_sample: RolloutSample
++    ref_log_prob: DataProto | None
++    ref_batch_id: int
++    ref_batch_size: int
++    ref_compute_s: float
++    ref_submit_s: float
++    rollout_received_at: float
++    ready_at: float
++
++
++class EventLogger:
++    """Append-only JSONL event log with absolute timestamps for post-hoc analysis.
++
++    Every record carries a wall-clock ``ts`` (epoch seconds) plus a ``t`` offset
++    from logger creation, so ref-service / per-update / param-sync / validate events
++    can be replayed on one timeline to study concurrency, per-update granularity
++    (which sync>1 step aggregation otherwise hides) and ref throughput over time.
++    Logging must never interrupt training, so every write is defensive.
++    """
++
++    def __init__(self, path: str | None):
++        self.path = path
++        self.enabled = bool(path)
++        self.start_ts = time.time()
++        self._fh = None
++        if not self.enabled:
++            return
++        try:
++            os.makedirs(os.path.dirname(path), exist_ok=True)
++            self._fh = open(path, "a", buffering=1)  # line-buffered
++            self.emit("logger_start", start_ts=self.start_ts)
++            print(f"[FullyAsyncTrainer][EventLogger] writing events to {path}")
++        except Exception as exc:  # pragma: no cover - logging must never crash training
++            print(f"[FullyAsyncTrainer][EventLogger] disabled, failed to open {path}: {exc}")
++            self.enabled = False
++            self._fh = None
++
++    def emit(self, ev: str, *, gstep: int | None = None, pver: int | None = None, **fields):
++        if not self.enabled or self._fh is None:
++            return
++        try:
++            now = time.time()
++            rec = {"ts": round(now, 6), "t": round(now - self.start_ts, 6), "ev": ev}
++            if gstep is not None:
++                rec["gstep"] = gstep
++            if pver is not None:
++                rec["pver"] = pver
++            for k, v in fields.items():
++                if isinstance(v, float):
++                    v = round(v, 6)
++                rec[k] = v
++            self._fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
++        except Exception:  # pragma: no cover - never crash training on a log write
++            pass
++
++    def close(self):
++        if self._fh is not None:
++            try:
++                self.emit("logger_stop")
++                self._fh.close()
++            except Exception:
++                pass
++            self._fh = None
++
++
+ @ray.remote(num_cpus=10)
+ class FullyAsyncTrainer(SeparateRayPPOTrainer):
+     """
+@@ -158,6 +245,40 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
+         # Reference to rollouter for parameter synchronization
+         self.rollouter = None
+         self.checkpoint_manager = None
++        self.prefetch_task = None
++        self.async_ref_enabled = OmegaConf.select(config, "fully_async_split.async_ref", default=True)
++        self.ref_service_enabled = OmegaConf.select(config, "fully_async_split.ref_service", default=False)
++        self.ref_micro_batch_size = int(
++            OmegaConf.select(config, "fully_async_split.ref_micro_batch_size", default=self.required_samples)
++        )
++        self.ref_micro_batch_timeout_s = float(
++            OmegaConf.select(config, "fully_async_split.ref_micro_batch_timeout_s", default=0.2)
++        )
++        ready_queue_size_default = max(self.required_samples * self.trigger_parameter_sync_step * 2, self.required_samples)
++        self.ref_ready_queue_size = int(
++            OmegaConf.select(config, "fully_async_split.ready_queue_size", default=ready_queue_size_default)
++        )
++        self.ref_ready_queue: asyncio.Queue[RefReadySample | None] | None = None
++        self.ref_service_task: asyncio.Task | None = None
++        self.ref_service_batch_id = 0
++        self.ref_service_stop_seen = False
++        self.ref_service_stats = {
++            "raw_samples": 0,
++            "ready_samples": 0,
++            "ref_batches": 0,
++            "ref_compute_total_s": 0.0,
++            "ref_submit_total_s": 0.0,
++        }
++        # Detailed timestamped event log for post-hoc analysis (per-update granularity,
++        # ref-service throughput, concurrency timeline). Path comes from the runner via
++        # EVENT_LOG_PATH; disabled gracefully if unset.
++        self.event_log = EventLogger(os.environ.get("EVENT_LOG_PATH"))
++        # Uniform cross-trainer phase-event log (marked_timer spans) for the
++        # efficiency comparison; separate file so it never collides with the
++        # bespoke EVENT_LOG_PATH stream consumed by RL/analyze_events.py.
++        from verl.utils.profiler.performance import enable_phase_events
++
++        enable_phase_events(os.environ.get("PHASE_EVENT_LOG_PATH"))
+ 
+         # Hybrid checkpoint manager for trainer-side validation (use_trainer_do_validate)
+         # Uses naive backend to sync weights from trainer to hybrid rollout replicas.
+@@ -361,6 +482,21 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
+         self.actor_wg = self.all_wg[str(self.train_role)]
+         self.actor_wg.init_model()
+         self.actor_rollout_wg = self.actor_wg  # to be compatible with the functions that not be modified
++        self._log_worker_visible_devices()
++
++    def _log_worker_visible_devices(self):
++        try:
++            actor_visible = self.actor_wg.execute_all_sync("get_cuda_visible_devices")
++            print(f"[FullyAsyncTrainer] actor CUDA_VISIBLE_DEVICES={actor_visible}")
++        except Exception as exc:
++            print(f"[FullyAsyncTrainer] failed to query actor CUDA_VISIBLE_DEVICES: {exc}")
++
++        if self.use_reference_policy and not self.ref_in_actor:
++            try:
++                ref_visible = self.ref_policy_wg.execute_all_sync("get_cuda_visible_devices")
++                print(f"[FullyAsyncTrainer] ref CUDA_VISIBLE_DEVICES={ref_visible}")
++            except Exception as exc:
++                print(f"[FullyAsyncTrainer] failed to query ref CUDA_VISIBLE_DEVICES: {exc}")
+ 
+     async def init_workers(self):
+         """Initialize distributed training workers using Ray backend.
+@@ -394,6 +530,8 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
+         self.curr_step_profile = False
+         self.next_step_profile = False
+ 
++        self._start_ref_service_if_needed()
++
+         # Use queue mode, no need for traditional dataloader iterator
+         # Initialize to get the first batch of data
+         while True:
+@@ -404,10 +542,11 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
+                 break
+ 
+         self.progress_bar.close()
+-        if self.current_param_version % self.config.trainer.test_freq != 0 or self.local_trigger_step > 1:
+-            await self._fit_update_weights()
+-            await self._fit_validate()
++        await self._stop_ref_service()
++        self._flush_metrics_aggregator()
++        await self._fit_validate()
+         self._fit_save_checkpoint(force=True)
++        self.event_log.close()
+ 
+     async def fit_step(self, batch_dict: dict = None):
+         """
+@@ -433,18 +572,35 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
+         self._fit_start_profile(should_profiler=should_profile)
+ 
+         with marked_timer("step", self.timing_raw):
+-            batch = await self._fit_generate(None)
++            prefetched = await self._take_prefetched_batch()
++            if prefetched.batch is None:
++                raise TrainingStopException("Training terminated: prefetch returned None")
++
++            batch = prefetched.batch
++            self.timing_raw.update(prefetched.timing_raw)
++            self.metrics.update(prefetched.metrics)
+             batch = self._fit_compute_reward(batch)
+             batch = self._fit_compute_log_prob(batch)
+-            batch = self._fit_compute_ref_log_prob(batch)
++            batch = await self._fit_compute_ref_log_prob_async(batch, prefetched.ref_future)
+             batch = self._fit_compute_critic(batch)
+             batch = self._fit_compute_advantage(batch)
+             batch = self._fit_update_critic(batch)
+-            batch = self._fit_update_actor(batch)
++            self._schedule_prefetch()
++            batch = await self._fit_update_actor_async(batch)
+             self._fit_update_local_step()
+             await self._fit_update_weights()
+             self._fit_dump_data(batch)
+ 
++        # Per-step timing snapshot with absolute timestamp so the aggregated TB step
++        # can be aligned against the fine-grained event stream.
++        self.event_log.emit(
++            "step",
++            gstep=self.global_steps,
++            pver=self.current_param_version,
++            local_trigger_step=self.local_trigger_step,
++            **{f"timing_s/{k}": v for k, v in self.timing_raw.items()},
++        )
++
+         await self._fit_validate()
+         self._fit_save_checkpoint()
+         self._fit_stop_profile(should_profiler=should_profile)
+@@ -462,6 +618,332 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
+         batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
+         return batch
+ 
++    async def _prefetch_generate_and_ref(self) -> PrefetchedBatch:
++        """Fetch one train batch from the queue and submit ref forward early.
++
++        The returned timing belongs to the prefetched batch, even if the work
++        overlaps with the previous step's actor update.
++        """
++        timing_raw = {}
++        metrics = {}
++        if self.ref_service_enabled and self.use_reference_policy:
++            with marked_timer("gen", timing_raw, color="red"):
++                batch = await self._get_ready_batch_from_ref_service()
++                if batch is None:
++                    return PrefetchedBatch(batch=None, timing_raw=timing_raw, metrics=metrics, ref_future=None)
++                self._collect_metrics_from_samples(batch, metrics)
++            timing_raw["ready_wait"] = timing_raw["gen"]
++            return PrefetchedBatch(batch=batch, timing_raw=timing_raw, metrics=metrics, ref_future=None)
++
++        with marked_timer("gen", timing_raw, color="red"):
++            epoch, batch = await self._get_samples_from_queue()
++            if batch is None:
++                return PrefetchedBatch(batch=None, timing_raw=timing_raw, metrics=metrics, ref_future=None)
++            self._collect_metrics_from_samples(batch, metrics)
++        batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
++        ref_future = self._submit_ref_log_prob(batch, timing_raw)
++        return PrefetchedBatch(batch=batch, timing_raw=timing_raw, metrics=metrics, ref_future=ref_future)
++
++    def _schedule_prefetch(self):
++        if self.prefetch_task is None:
++            self.prefetch_task = asyncio.create_task(self._prefetch_generate_and_ref(), name="prefetch_generate_ref")
++
++    async def _take_prefetched_batch(self) -> PrefetchedBatch:
++        was_ready = self.prefetch_task is not None and self.prefetch_task.done()
++        if self.prefetch_task is None:
++            self._schedule_prefetch()
++        with marked_timer("prefetch_wait", self.timing_raw):
++            prefetched = await self.prefetch_task
++        self.prefetch_task = None
++        self.metrics["fully_async/prefetch/ready_at_step_start"] = float(was_ready)
++        return prefetched
++
++    def _prepare_ref_input(self, batch: DataProto):
++        batch_td = batch.to_tensordict()
++        batch_td = left_right_2_no_padding(batch_td)
++        metadata = {"calculate_entropy": False, "compute_loss": False}
++        if self.ref_in_actor:
++            metadata["no_lora_adapter"] = True
++        tu.assign_non_tensor(batch_td, **metadata)
++        return batch_td
++
++    def _rollout_sample_from_payload(self, payload):
++        if payload is None:
++            return None
++        return ray.cloudpickle.loads(payload)
++
++    async def _get_rollout_sample_payload(self):
++        item = await self.message_queue_client.get_sample()
++        if item is None:
++            return None, 0
++        payload, queue_len = item
++        if payload is None:
++            return None, queue_len
++        return payload, queue_len
++
++    def _start_ref_service_if_needed(self):
++        if not self.ref_service_enabled:
++            return
++        if not self.use_reference_policy:
++            return
++        if self.ref_ready_queue is None:
++            self.ref_ready_queue = asyncio.Queue(maxsize=self.ref_ready_queue_size)
++        if self.ref_service_task is None:
++            print(
++                "[FullyAsyncTrainer][RefService] starting "
++                f"micro_batch_size={self.ref_micro_batch_size} "
++                f"timeout_s={self.ref_micro_batch_timeout_s} "
++                f"ready_queue_size={self.ref_ready_queue_size}"
++            )
++            self.ref_service_task = asyncio.create_task(self._ref_service_loop(), name="ref_service_loop")
++
++    async def _stop_ref_service(self):
++        if self.ref_service_task is None:
++            return
++        if not self.ref_service_task.done():
++            self.ref_service_task.cancel()
++        await asyncio.gather(self.ref_service_task, return_exceptions=True)
++        self.ref_service_task = None
++
++    async def _collect_ref_micro_batch(self) -> list[tuple[RolloutSample, float, int]] | None:
++        first_payload, queue_len = await self._get_rollout_sample_payload()
++        if first_payload is None:
++            return None
++
++        batch_items = [(self._rollout_sample_from_payload(first_payload), time.time(), queue_len)]
++        deadline = time.time() + self.ref_micro_batch_timeout_s
++
++        while len(batch_items) < self.ref_micro_batch_size:
++            timeout = deadline - time.time()
++            if timeout <= 0:
++                break
++            try:
++                payload, queue_len = await asyncio.wait_for(self._get_rollout_sample_payload(), timeout=timeout)
++            except asyncio.TimeoutError:
++                break
++            if payload is None:
++                self.ref_service_stop_seen = True
++                break
++            batch_items.append((self._rollout_sample_from_payload(payload), time.time(), queue_len))
++
++        return batch_items
++
++    async def _ref_service_loop(self):
++        assert self.ref_ready_queue is not None
++        print("[FullyAsyncTrainer][RefService] loop started")
++        try:
++            while True:
++                micro_batch_items = await self._collect_ref_micro_batch()
++                if not micro_batch_items:
++                    break
++                await self._process_ref_micro_batch(micro_batch_items)
++                if self.ref_service_stop_seen:
++                    break
++        except asyncio.CancelledError:
++            raise
++        except Exception as exc:
++            print(f"[FullyAsyncTrainer][RefService] failed: {exc}")
++            raise
++        finally:
++            await self.ref_ready_queue.put(None)
++            print("[FullyAsyncTrainer][RefService] loop stopped")
++
++    async def _process_ref_micro_batch(self, micro_batch_items: list[tuple[RolloutSample, float, int]]):
++        samples = [item[0] for item in micro_batch_items]
++        received_times = [item[1] for item in micro_batch_items]
++        queue_lens = [item[2] for item in micro_batch_items]
++        batch_id = self.ref_service_batch_id
++        self.ref_service_batch_id += 1
++
++        assemble_start = time.time()
++        batch = assemble_batch_from_rollout_samples(samples, self.tokenizer, self.config, None)
++        batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
++        assemble_s = time.time() - assemble_start
++
++        submit_start = time.time()
++        batch_td = self._prepare_ref_input(batch)
++        submit_s = time.time() - submit_start
++        compute_start = time.time()
++        ref_log_prob = await asyncio.to_thread(self._compute_ref_log_prob_from_td, batch_td)
++        compute_s = time.time() - compute_start
++
++        split_sizes = [len(sample.full_batch) for sample in samples]
++        ref_chunks = []
++        start = 0
++        for size in split_sizes:
++            ref_chunks.append(ref_log_prob[start : start + size])
++            start += size
++
++        now = time.time()
++        for sample, ref_chunk, received_at in zip(samples, ref_chunks, received_times, strict=False):
++            ready_item = RefReadySample(
++                rollout_sample=sample,
++                ref_log_prob=ref_chunk,
++                ref_batch_id=batch_id,
++                ref_batch_size=len(samples),
++                ref_compute_s=compute_s,
++                ref_submit_s=submit_s,
++                rollout_received_at=received_at,
++                ready_at=now,
++            )
++            await self.ref_ready_queue.put(ready_item)
++
++        self.ref_service_stats["raw_samples"] += len(samples)
++        self.ref_service_stats["ready_samples"] += len(samples)
++        self.ref_service_stats["ref_batches"] += 1
++        self.ref_service_stats["ref_compute_total_s"] += compute_s
++        self.ref_service_stats["ref_submit_total_s"] += submit_s
++        print(
++            "[FullyAsyncTrainer][RefService] "
++            f"batch_id={batch_id} samples={len(samples)} seqs={len(batch)} "
++            f"assemble={assemble_s:.2f}s submit={submit_s:.2f}s ref={compute_s:.2f}s "
++            f"ready_q={self.ref_ready_queue.qsize()} mq_len_last={queue_lens[-1] if queue_lens else -1}"
++        )
++        self.event_log.emit(
++            "ref_micro_batch",
++            gstep=self.global_steps,
++            pver=self.current_param_version,
++            batch_id=batch_id,
++            samples=len(samples),
++            seqs=len(batch),
++            assemble_s=assemble_s,
++            submit_s=submit_s,
++            compute_s=compute_s,
++            ready_q=self.ref_ready_queue.qsize(),
++            mq_len_last=queue_lens[-1] if queue_lens else -1,
++        )
++
++    async def _get_ready_batch_from_ref_service(self) -> DataProto | None:
++        assert self.ref_ready_queue is not None
++        ready_items: list[RefReadySample] = []
++        wait_start = time.time()
++        while len(ready_items) < self.required_samples:
++            item = await self.ref_ready_queue.get()
++            if item is None:
++                break
++            ready_items.append(item)
++            if len(ready_items) % 64 == 0:
++                print(
++                    "[FullyAsyncTrainer][RefService] "
++                    f"ready samples {len(ready_items)}/{self.required_samples}, "
++                    f"ready_q={self.ref_ready_queue.qsize()}"
++                )
++
++        total_wait_time = time.time() - wait_start
++        if len(ready_items) < self.required_samples:
++            print(
++                "[FullyAsyncTrainer][RefService] not enough ready samples: "
++                f"{len(ready_items)}/{self.required_samples}"
++            )
++            return None
++
++        rollout_samples = [item.rollout_sample for item in ready_items]
++        batch = assemble_batch_from_rollout_samples(rollout_samples, self.tokenizer, self.config, None)
++        if self.use_reference_policy:
++            ref_log_prob = DataProto.concat([item.ref_log_prob for item in ready_items])
++            batch = batch.union(ref_log_prob)
++        if self.config.trainer.balance_batch:
++            self._balance_batch(batch, metrics={})
++
++        batch.meta_info["fully_async/total_wait_time"] = total_wait_time
++        batch.meta_info["fully_async/ref_service/ready_queue_size"] = self.ref_ready_queue.qsize()
++        batch.meta_info["fully_async/ref_service/raw_samples"] = self.ref_service_stats["raw_samples"]
++        batch.meta_info["fully_async/ref_service/ready_samples"] = self.ref_service_stats["ready_samples"]
++        batch.meta_info["fully_async/ref_service/ref_batches"] = self.ref_service_stats["ref_batches"]
++        batch.meta_info["fully_async/ref_service/micro_batches_in_train_batch"] = len(
++            {item.ref_batch_id for item in ready_items}
++        )
++        batch.meta_info["fully_async/ref_service/micro_batch_size_mean"] = float(
++            sum(item.ref_batch_size for item in ready_items) / len(ready_items)
++        )
++
++        ref_batch_seen = {}
++        for item in ready_items:
++            ref_batch_seen.setdefault(item.ref_batch_id, item)
++        batch.meta_info["timing_s/ref_service_compute"] = sum(item.ref_compute_s for item in ref_batch_seen.values())
++        batch.meta_info["timing_s/ref_service_submit"] = sum(item.ref_submit_s for item in ref_batch_seen.values())
++        batch.meta_info["timing_s/ref_service_queue_to_ready_mean"] = float(
++            sum(item.ready_at - item.rollout_received_at for item in ready_items) / len(ready_items)
++        )
++        batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
++        return batch
++
++    def _compute_ref_log_prob_from_td(self, batch_td):
++        if self.ref_in_actor:
++            output = self.actor_rollout_wg.compute_log_prob(batch_td)
++        else:
++            output = self.ref_policy_wg.compute_ref_log_prob(batch_td)
++        log_probs = tu.get(output, "log_probs")
++        log_probs = no_padding_2_padding(log_probs, batch_td)
++        ref_log_prob = tu.get_tensordict({"ref_log_prob": log_probs.float()})
++        return DataProto.from_tensordict(ref_log_prob)
++
++    def _submit_ref_log_prob(self, batch: DataProto, timing_raw: dict[str, float]) -> RefLogProbFuture | None:
++        if not self.use_reference_policy:
++            return None
++        if not self.async_ref_enabled:
++            return None
++
++        submit_start = time.time()
++        batch_td = self._prepare_ref_input(batch)
++        loop = asyncio.get_running_loop()
++        future = loop.run_in_executor(None, self._compute_ref_log_prob_from_td, batch_td)
++        timing_raw["ref_async_submit"] = time.time() - submit_start
++        return RefLogProbFuture(future=future, submitted_at=submit_start, batch_size=len(batch))
++
++    async def _fit_compute_ref_log_prob_async(
++        self, batch: DataProto, ref_future: RefLogProbFuture | None
++    ) -> DataProto:
++        timing_raw = self.timing_raw
++        if not self.use_reference_policy:
++            return batch
++        if batch.batch is not None and "ref_log_prob" in batch.batch.keys():
++            timing_raw.setdefault("ref_async_join", 0.0)
++            timing_raw.setdefault("ref_async_total", 0.0)
++            timing_raw.setdefault(str(Role.RefPolicy), 0.0)
++            self.metrics["fully_async/ref_service/enabled"] = 1.0
++            self.metrics["fully_async/ref/batch_size"] = len(batch)
++            self.metrics["fully_async/ref/overlap_s"] = float(
++                batch.meta_info.get("timing_s/ref_service_compute", 0.0)
++            )
++            return batch
++
++        if ref_future is None:
++            batch = self._fit_compute_ref_log_prob(batch)
++            return batch
++
++        join_start = time.time()
++        with marked_timer("ref_async_join", timing_raw):
++            ref_log_prob = await ref_future.future
++        timing_raw["ref_async_total"] = time.time() - ref_future.submitted_at
++        timing_raw[str(Role.RefPolicy)] = timing_raw["ref_async_total"]
++        self.metrics["fully_async/ref/batch_size"] = ref_future.batch_size
++        self.metrics["fully_async/ref/overlap_s"] = max(
++            0.0, timing_raw["ref_async_total"] - (time.time() - join_start)
++        )
++        return batch.union(ref_log_prob)
++
++    async def _fit_update_actor_async(self, batch: DataProto) -> DataProto:
++        self.event_log.emit(
++            "update_actor_start",
++            gstep=self.global_steps,
++            pver=self.current_param_version,
++            local_trigger_step=self.local_trigger_step,
++        )
++        update_start = time.time()
++        with marked_timer("update_actor_async", self.timing_raw):
++            result = await asyncio.to_thread(self._fit_update_actor, batch)
++        # Per-update granularity: sync>1 aggregates these into one TB point, so the
++        # individual update wall-clock only survives in the event log.
++        self.event_log.emit(
++            "update_actor_end",
++            gstep=self.global_steps,
++            pver=self.current_param_version,
++            local_trigger_step=self.local_trigger_step,
++            update_s=time.time() - update_start,
++        )
++        return result
++
+     def _compute_old_log_prob(self, batch: DataProto):
+         """
+         If algorithm.rollout_correction.bypass_mode is False,
+@@ -507,13 +989,20 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
+         if steps is not None and last_profiler_step in steps:
+             await asyncio.wrap_future(self.rollouter._stop_profiling.remote().future())
+ 
+-        with marked_timer("timing_s/param_sync", self.timing_raw):
++        self.event_log.emit("param_sync_start", gstep=self.global_steps, pver=self.current_param_version)
++        with marked_timer("param_sync", self.timing_raw):
+             await self.checkpoint_manager.update_weights(global_steps=self.current_param_version)
+         print(
+             f"[FullyAsyncTrainer] _fit_update_weights, "
+-            f"timing_s/param_sync: {self.timing_raw['timing_s/param_sync']:.4f} seconds "
++            f"param_sync: {self.timing_raw['param_sync']:.4f} seconds "
+             f"self.current_param_version: {self.current_param_version}"
+         )
++        self.event_log.emit(
++            "param_sync_end",
++            gstep=self.global_steps,
++            pver=self.current_param_version,
++            param_sync_s=self.timing_raw["param_sync"],
++        )
+ 
+         profiler_step = last_profiler_step + 1
+ 
+@@ -527,11 +1016,12 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
+             step=self.current_param_version,
+         )
+ 
+-        # Log aggregated training metrics
+-        self.logger.log(
+-            data=self.metrics_aggregator.get_aggregated_metrics(),
+-            step=self.current_param_version,
+-        )
++    def _flush_metrics_aggregator(self):
++        """Write buffered step metrics without triggering another rollout weight sync."""
++        aggregated_metrics = self.metrics_aggregator.get_aggregated_metrics()
++        if not aggregated_metrics:
++            return
++        self.logger.log(data=aggregated_metrics, step=self.current_param_version)
+         self.metrics_aggregator.reset()
+ 
+     async def _fit_validate(self, val_before_train=False):
+@@ -548,11 +1038,34 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
+         if not need_validate and not val_before_train:
+             return
+         # Execute validation
++        self.event_log.emit(
++            "validate_start",
++            gstep=self.global_steps,
++            pver=self.current_param_version,
++            val_before_train=val_before_train,
++        )
++        validate_start = time.time()
+         if self.config.async_training.use_trainer_do_validate:
+             await self._trainer_side_validate()
+         else:
+-            val_metrics = await self.rollouter.do_validate.remote()
++            # Reuse the sampling side (rollouter) for held-out eval instead of
++            # spawning extra GPUs: pause generation, run validation on the freed
++            # vLLM engines, then resume sampling.
++            pause_info = await self.rollouter.pause_for_eval.remote()
++            try:
++                val_metrics = await self.rollouter.do_validate.remote()
++            finally:
++                # Always resume sampling, even if validation raised.
++                await self.rollouter.resume_after_eval.remote()
++            if isinstance(pause_info, dict):
++                val_metrics = {**val_metrics, **pause_info}
+             self.logger.log(data=val_metrics, step=self.current_param_version)
++        self.event_log.emit(
++            "validate_end",
++            gstep=self.global_steps,
++            pver=self.current_param_version,
++            validate_s=time.time() - validate_start,
++        )
+ 
+     async def _trainer_side_validate(self):
+         """Run trainer-side validation using hybrid rollout replicas."""
+@@ -630,6 +1143,7 @@ class FullyAsyncTrainer(SeparateRayPPOTrainer):
+         )
+ 
+         if self.local_trigger_step == 1:
++            self._flush_metrics_aggregator()
+             self.progress_bar.update(1)
+ 
+     def _save_checkpoint(self):
+diff --git a/verl/experimental/one_step_off_policy/ray_trainer.py b/verl/experimental/one_step_off_policy/ray_trainer.py
+index 0a0c1f06..9af44e9d 100644
+--- a/verl/experimental/one_step_off_policy/ray_trainer.py
++++ b/verl/experimental/one_step_off_policy/ray_trainer.py
+@@ -19,6 +19,7 @@ This trainer supports model-agonistic model initialization with huggingface
+ """
+ 
+ import asyncio
++import os
+ import uuid
+ from pprint import pprint
+ from typing import Optional
+@@ -273,6 +274,12 @@ class OneStepOffRayTrainer(SeparateRayPPOTrainer):
+ 
+         from verl.utils.tracking import Tracking
+ 
++        # Uniform cross-trainer phase-event log (marked_timer spans) for the
++        # efficiency comparison. No-op unless PHASE_EVENT_LOG_PATH is set.
++        from verl.utils.profiler.performance import enable_phase_events
++
++        enable_phase_events(os.environ.get("PHASE_EVENT_LOG_PATH"))
++
+         self.logger = Tracking(
+             project_name=self.config.trainer.project_name,
+             experiment_name=self.config.trainer.experiment_name,
+diff --git a/verl/experimental/separation/ray_trainer.py b/verl/experimental/separation/ray_trainer.py
+index b1a34a54..2be1135c 100644
+--- a/verl/experimental/separation/ray_trainer.py
++++ b/verl/experimental/separation/ray_trainer.py
+@@ -19,6 +19,7 @@ PPO Trainer with Ray-based single controller.
+ This trainer supports model-agonistic model initialization with huggingface
+ """
+ 
++import os
+ import uuid
+ from pprint import pprint
+ from typing import Any, Optional
+@@ -617,6 +618,31 @@ class SeparateRayPPOTrainer(RayPPOTrainer):
+                 norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+                 config=self.config.algorithm,
+             )
++
++            # wrongpool 对照实验(组件①):全错/蒙对组梯度屏蔽 + 入错题池。
++            # 默认关(WRONGPOOL_ENABLE!=1 时为 no-op),不影响其它 run。按绝对路径加载
++            # 并缓存,避免 Ray worker 里 sys.path/CWD 不确定导致 import 失败。
++            if os.environ.get("WRONGPOOL_ENABLE", "0") in ("1", "true", "True"):
++                try:
++                    mod = getattr(self, "_wrongpool_mod", None)
++                    if mod is None:
++                        import importlib.util
++
++                        _hp = os.environ.get(
++                            "WRONGPOOL_HOOK_PATH",
++                            "/data/zilu/QseekLLM/src/post_train/RL/wrongpool_hook.py",
++                        )
++                        _spec = importlib.util.spec_from_file_location("wrongpool_hook", _hp)
++                        mod = importlib.util.module_from_spec(_spec)
++                        _spec.loader.exec_module(mod)
++                        self._wrongpool_mod = mod
++                    mod.process(
++                        batch,
++                        pver=getattr(self, "current_param_version", -1),
++                        metrics=self.metrics,
++                    )
++                except Exception as _wp_e:  # 实验 hook 不得拖垮训练
++                    print(f"[wrongpool_hook] skipped: {_wp_e}", flush=True)
+         return batch
+ 
+     def _fit_update_critic(self, batch: DataProto) -> DataProto:
+diff --git a/verl/trainer/main_ppo_sync.py b/verl/trainer/main_ppo_sync.py
+index 0c0a7450..68a038ae 100644
+--- a/verl/trainer/main_ppo_sync.py
++++ b/verl/trainer/main_ppo_sync.py
+@@ -1313,7 +1313,7 @@ class PPOTrainer:
+             )
+             data["old_log_probs"] = data.pop("rollout_log_probs")
+             tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data)
+-            return
++            return batch
+ 
+         # 1. compute log probs
+         batch.extra_info.update(
+@@ -1334,9 +1334,7 @@ class PPOTrainer:
+         # 2. write old_log_probs and entropy back to TransferQueue
+         data["old_log_probs"] = response_from_nested(data.pop("log_probs"), data["response_mask"])
+         data["entropy"] = response_from_nested(data.pop("entropy"), data["response_mask"])
+-        batch = tq.kv_batch_put(
+-            keys=batch.keys, partition_id=batch.partition_id, fields=data.select("old_log_probs", "entropy")
+-        )
++        tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=data.select("old_log_probs", "entropy"))
+ 
+         data = DataProto(batch=data.to_padded_tensor())
+ 
+@@ -1461,7 +1459,7 @@ class PPOTrainer:
+             output[field] = response_to_nested(data.batch[field], response_mask)
+         output = TensorDict(output, batch_size=len(batch))
+ 
+-        batch = tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=output)
++        tq.kv_batch_put(keys=batch.keys, partition_id=batch.partition_id, fields=output)
+ 
+         return batch
+ 
+@@ -1587,6 +1585,14 @@ class PPOTrainer:
+         metrics.update(compute_spec_decode_metrics(spec_drafts, spec_accepts, spec_verifies, non_padding_mask))
+ 
+     def fit(self):
++        # Uniform cross-trainer phase-event log: every marked_timer span in this
++        # serial loop (gen -> reward -> ref -> update_actor -> update_weights)
++        # emits start/end with absolute timestamps for the efficiency-comparison
++        # Gantt. No-op unless PHASE_EVENT_LOG_PATH is set.
++        from verl.utils.profiler.performance import enable_phase_events
++
++        enable_phase_events(os.environ.get("PHASE_EVENT_LOG_PATH"))
++
+         if self._dump_executor._shutdown:
+             self._init_dump_executor()
+ 
+diff --git a/verl/trainer/ppo/ray_trainer.py b/verl/trainer/ppo/ray_trainer.py
+index d1eaa7bd..b0efe786 100644
+--- a/verl/trainer/ppo/ray_trainer.py
++++ b/verl/trainer/ppo/ray_trainer.py
+@@ -845,6 +845,9 @@ class RayPPOTrainer:
+         wg_kwargs = {}  # Setting up kwargs for RayWorkerGroup
+         if OmegaConf.select(self.config.trainer, "ray_wait_register_center_timeout") is not None:
+             wg_kwargs["ray_wait_register_center_timeout"] = self.config.trainer.ray_wait_register_center_timeout
++        master_port_range = OmegaConf.select(self.config, "fully_async_split.master_port_range")
++        if master_port_range is not None:
++            wg_kwargs["master_port_range"] = OmegaConf.to_container(master_port_range)
+         if OmegaConf.select(self.config.global_profiler, "steps") is not None:
+             wg_kwargs["profile_steps"] = OmegaConf.select(self.config.global_profiler, "steps")
+             # Only require nsight worker options when tool is nsys
+diff --git a/verl/utils/dataset/multiturn_sft_dataset.py b/verl/utils/dataset/multiturn_sft_dataset.py
+index 977632e8..ee026bef 100644
+--- a/verl/utils/dataset/multiturn_sft_dataset.py
++++ b/verl/utils/dataset/multiturn_sft_dataset.py
+@@ -324,10 +324,12 @@ class MultiTurnSFTDataset(Dataset):
+         print_assembled_message(self.tokenizer, messages, input_ids, loss_mask, attention_mask, tools)
+         self.sanity_check(input_ids, messages, tools, enable_thinking)
+ 
+-        # Since the tokenizer may return user-customized results, we need to filter out inconsistent tensor shapes
++        # Since the tokenizer may return user-customized results, we need to filter out inconsistent tensor shapes.
++        # Text tokenizers can also return token_type_ids; they are not multimodal inputs and can appear only for
++        # samples whose per-turn lengths line up, which makes batch keys inconsistent under no-padding collation.
+         keys_to_remove = []
+         for k, v in multi_modal_inputs.items():
+-            if k == "mm_token_type_ids":
++            if k in {"token_type_ids", "mm_token_type_ids"}:
+                 keys_to_remove.append(k)
+                 continue
+             if len(v) > 0 and v[0] is not None and isinstance(v[0], torch.Tensor):
+diff --git a/verl/utils/profiler/performance.py b/verl/utils/profiler/performance.py
+index 35e51e27..500542d3 100644
+--- a/verl/utils/profiler/performance.py
++++ b/verl/utils/profiler/performance.py
+@@ -26,6 +26,79 @@ from verl.utils.device import get_device_id, get_torch_device
+ from verl.utils.logger import DecoratorLoggerBase
+ 
+ 
++# ---------------------------------------------------------------------------
++# Optional phase-event logging for cross-trainer efficiency comparison.
++#
++# Every ``marked_timer(...)`` span (gen / ref / reward / update_actor /
++# update_weights / step / ...) can emit a ``{name}_start`` / ``{name}_end``
++# record with an absolute wall-clock timestamp, so a fine-grained Gantt of the
++# training pipeline can be reconstructed post-hoc and aligned against the
++# gpu.csv hardware-utilisation samples.
++#
++# This is OFF by default and has zero cost (one ``is None`` check per span)
++# unless a process *explicitly* calls ``enable_phase_events(path)``. Only the
++# orchestration/driver process should enable it; rollout/ref/reward worker
++# processes never call enable, so they neither emit nor touch the log file.
++# Writing must never interrupt training, so every write is defensive.
++# ---------------------------------------------------------------------------
++import json as _json
++import os as _os
++import time as _time
++
++_PHASE_EVENT_LOGGER = None
++
++
++class _PhaseEventLogger:
++    def __init__(self, path: str):
++        self.path = path
++        self.start_ts = _time.time()
++        self._fh = None
++        try:
++            d = _os.path.dirname(path)
++            if d:
++                _os.makedirs(d, exist_ok=True)
++            self._fh = open(path, "a", buffering=1)  # line-buffered
++            self.emit("phase_logger_start", pid=_os.getpid())
++        except Exception as exc:  # pragma: no cover - logging must never crash training
++            print(f"[PhaseEventLogger] disabled, failed to open {path}: {exc}")
++            self._fh = None
++
++    def emit(self, ev: str, **fields):
++        if self._fh is None:
++            return
++        try:
++            now = _time.time()
++            rec = {"ts": round(now, 6), "t": round(now - self.start_ts, 6), "ev": ev}
++            for k, v in fields.items():
++                if isinstance(v, float):
++                    v = round(v, 6)
++                rec[k] = v
++            self._fh.write(_json.dumps(rec, ensure_ascii=False) + "\n")
++        except Exception:  # pragma: no cover - never crash training on a log write
++            pass
++
++
++def enable_phase_events(path: str | None) -> bool:
++    """Enable marked_timer phase-event logging in *this* process.
++
++    Returns True if enabled. Call once from the trainer driver. No-op if
++    ``path`` is falsy or already enabled.
++    """
++    global _PHASE_EVENT_LOGGER
++    if not path or _PHASE_EVENT_LOGGER is not None:
++        return _PHASE_EVENT_LOGGER is not None
++    _PHASE_EVENT_LOGGER = _PhaseEventLogger(path)
++    print(f"[PhaseEventLogger] phase events -> {path}")
++    return True
++
++
++def _emit_phase(ev: str, name: str, **fields):
++    logger = _PHASE_EVENT_LOGGER
++    if logger is None:
++        return
++    logger.emit(ev, phase=name, **fields)
++
++
+ def _get_current_mem_info(unit: str = "GB", precision: int = 2) -> tuple[str]:
+     """Get current memory usage.
+ 
+@@ -144,8 +217,12 @@ def _timer(name: str, timing_raw: dict[str, float]):
+         name (str): The name/identifier for this timing measurement.
+         timing_raw (Dict[str, float]): Dictionary to store timing information.
+     """
+-    with Timer(name=name, logger=None) as timer:
+-        yield
++    _emit_phase("phase_start", name)
++    try:
++        with Timer(name=name, logger=None) as timer:
++            yield
++    finally:
++        _emit_phase("phase_end", name)
+     if name not in timing_raw:
+         timing_raw[name] = 0
+     timing_raw[name] += timer.last
+diff --git a/verl/workers/engine/fsdp/transformer_impl.py b/verl/workers/engine/fsdp/transformer_impl.py
+index 2c66c6a3..4e243edb 100644
+--- a/verl/workers/engine/fsdp/transformer_impl.py
++++ b/verl/workers/engine/fsdp/transformer_impl.py
+@@ -18,6 +18,7 @@ The concrete Engine implementation using PyTorch FullyShardedDataParallel (FSDP)
+ import gc
+ import logging
+ import os
++import time
+ import warnings
+ from contextlib import nullcontext
+ from typing import Callable, ContextManager, Optional
+@@ -82,6 +83,15 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+ device_name = get_device_name()
+ 
+ 
++def _trace_weight_sync(message: str) -> None:
++    if os.getenv("VERL_NCCL_TRACE_WEIGHTS", "0").lower() in {"1", "true", "yes", "on"}:
++        print(f"[nccl-checkpoint-trace] fsdp-engine {message}", flush=True)
++
++
++def _fsdp_init_trace_enabled() -> bool:
++    return os.getenv("VERL_FSDP_INIT_TRACE", "0").lower() in {"1", "true", "yes", "on"}
++
++
+ class FSDPEngine(BaseEngine):
+     """
+     Concrete Engine implementation using PyTorch FullyShardedDataParallel (FSDP).
+@@ -114,6 +124,15 @@ class FSDPEngine(BaseEngine):
+         self.mode = None
+ 
+         self.rank = torch.distributed.get_rank()
++        init_start = time.time()
++        if _fsdp_init_trace_enabled():
++            print(
++                f"[fsdp-engine-init] rank={self.rank} "
++                f"forward_only={self.engine_config.forward_only} "
++                f"fsdp_size={self.engine_config.fsdp_size} "
++                f"param_offload={self.engine_config.param_offload} stage=start",
++                flush=True,
++            )
+ 
+         # Apply NPU patches for FSDP backend
+         from .utils import apply_npu_fsdp_patches
+@@ -130,7 +149,16 @@ class FSDPEngine(BaseEngine):
+                 "you must enable `use_remove_padding`."
+             )
+ 
++        mesh_start = time.time()
++        if _fsdp_init_trace_enabled():
++            print(f"[fsdp-engine-init] rank={self.rank} stage=init_device_mesh:start", flush=True)
+         self._init_device_mesh()
++        if _fsdp_init_trace_enabled():
++            print(
++                f"[fsdp-engine-init] rank={self.rank} stage=init_device_mesh:done "
++                f"elapsed={time.time() - mesh_start:.2f}s",
++                flush=True,
++            )
+ 
+         if self.engine_config.full_determinism:
+             enable_full_determinism(seed=self.engine_config.seed)
+@@ -164,6 +192,29 @@ class FSDPEngine(BaseEngine):
+             if self.engine_config.use_torch_compile  #  use torch compile by default
+             else entropy_from_logits
+         )
++        if _fsdp_init_trace_enabled():
++            print(
++                f"[fsdp-engine-init] rank={self.rank} stage=done "
++                f"elapsed={time.time() - init_start:.2f}s",
++                flush=True,
++            )
++
++    def _print_init_stage(self, stage: str, start_time: float | None = None):
++        if not _fsdp_init_trace_enabled():
++            return
++        elapsed = "" if start_time is None else f", elapsed={time.time() - start_time:.2f}s"
++        try:
++            world_size = torch.distributed.get_world_size()
++        except Exception:
++            world_size = "?"
++        print(
++            f"[fsdp-init] rank={self.rank} world={world_size} "
++            f"forward_only={self.engine_config.forward_only} "
++            f"fsdp_size={self.engine_config.fsdp_size} "
++            f"param_offload={self.engine_config.param_offload} "
++            f"stage={stage}{elapsed}",
++            flush=True,
++        )
+ 
+     @property
+     def is_param_offload_enabled(self) -> bool:
+@@ -343,7 +394,12 @@ class FSDPEngine(BaseEngine):
+ 
+         from verl.utils.torch_dtypes import PrecisionType
+ 
++        fsdp_build_start = time.time()
++        self._print_init_stage("build_fsdp_module:start")
++
+         mixed_precision_config = self.engine_config.mixed_precision
++        mixed_precision_start = time.time()
++        self._print_init_stage("mixed_precision:start", fsdp_build_start)
+         if mixed_precision_config is not None:
+             param_dtype = PrecisionType.to_dtype(mixed_precision_config.get("param_dtype", "bf16"))
+             reduce_dtype = PrecisionType.to_dtype(mixed_precision_config.get("reduce_dtype", "fp32"))
+@@ -354,6 +410,7 @@ class FSDPEngine(BaseEngine):
+             buffer_dtype = torch.float32
+ 
+         mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
++        self._print_init_stage("mixed_precision:done", mixed_precision_start)
+ 
+         self._autocast_dtype = param_dtype
+         # fp16 training requires loss scaling to avoid gradient underflow. Mirror the pattern
+@@ -365,14 +422,20 @@ class FSDPEngine(BaseEngine):
+         else:
+             self.scaler = None
+ 
++        wrap_policy_start = time.time()
++        self._print_init_stage("wrap_policy:start", fsdp_build_start)
+         auto_wrap_policy = get_fsdp_wrap_policy(
+             module=module,
+             config=self.engine_config.wrap_policy,
+             is_lora=self.model_config.lora_rank > 0,
+         )
++        self._print_init_stage("wrap_policy:done", wrap_policy_start)
+ 
++        sharding_start = time.time()
++        self._print_init_stage("sharding_strategy:start", fsdp_build_start)
+         fsdp_mesh = self.device_mesh
+         sharding_strategy = get_sharding_strategy(fsdp_mesh, zero3_enable=self.engine_config.reshard_after_forward)
++        self._print_init_stage("sharding_strategy:done", sharding_start)
+ 
+         # Note: We force turn off CPUOffload because it causes incorrect results when using grad accumulation
+         if self.engine_config.strategy == "fsdp":
+@@ -381,14 +444,24 @@ class FSDPEngine(BaseEngine):
+             # - critic: None
+             # - ref: CPUOffload(offload_params=True)
+ 
+-            # We force reference policy to use CPUOffload to save memory.
+-            # We force turn off CPUOffload for actor because it causes incorrect results when using grad accumulation
++            # Reference policy is forward-only. CPUOffload saves memory but can make
++            # standalone ref forward prohibitively slow on PCIe GPUs, so keep it
++            # controlled by fsdp_config.param_offload.
++            # We force turn off CPUOffload for actor because it causes incorrect results when using grad accumulation.
+             cpu_offload = None
+-            if self.engine_config.forward_only:
++            if self.engine_config.forward_only and self.engine_config.param_offload:
+                 cpu_offload = CPUOffload(offload_params=True)
+                 self._is_offload_param = False
+                 self._is_offload_optimizer = False
+ 
++            sync_module_states = not self.engine_config.forward_only
++            if _fsdp_init_trace_enabled():
++                print(
++                    f"[fsdp-init] rank={self.rank} forward_only={self.engine_config.forward_only} "
++                    f"sync_module_states={sync_module_states}",
++                    flush=True,
++                )
++            self._print_init_stage("FSDP ctor:start", fsdp_build_start)
+             module = FSDP(
+                 module,
+                 param_init_fn=init_fn,
+@@ -396,12 +469,13 @@ class FSDPEngine(BaseEngine):
+                 device_id=get_device_id(),
+                 sharding_strategy=sharding_strategy,
+                 mixed_precision=mixed_precision,
+-                sync_module_states=True,
++                sync_module_states=sync_module_states,
+                 device_mesh=self.device_mesh,
+                 forward_prefetch=self.engine_config.forward_prefetch,
+                 use_orig_params=self.engine_config.use_orig_params,
+                 cpu_offload=cpu_offload,
+             )
++            self._print_init_stage("FSDP ctor:done", fsdp_build_start)
+         elif self.engine_config.strategy == "fsdp2":
+             # - actor: offload_policy
+             # - critic: offload_policy
+@@ -446,6 +520,7 @@ class FSDPEngine(BaseEngine):
+                 state_dict_config=ShardedStateDictConfig(),
+             )
+ 
++        self._print_init_stage("build_fsdp_module:done", fsdp_build_start)
+         return module
+ 
+     def _build_optimizer(self, module):
+@@ -543,32 +618,55 @@ class FSDPEngine(BaseEngine):
+     def _build_model_optimizer(self):
+         from verl.utils.model import print_model_size
+ 
++        build_start = time.time()
++        self._print_init_stage("build_model_optimizer:start")
++
+         # Load base model with specified configuration and dtype
++        module_start = time.time()
++        self._print_init_stage("build_module:start", build_start)
+         module = self._build_module()
++        self._print_init_stage("build_module:done", module_start)
+         # Apply LoRA adapters if low-rank adaptation is enabled
+         if self._is_lora:
++            lora_start = time.time()
++            self._print_init_stage("build_lora:start", build_start)
+             module = self._build_lora_module(module)
++            self._print_init_stage("build_lora:done", lora_start)
+ 
+         # Apply QAT before FSDP wrapping (training only)
+         if self._qat_enabled and not self.engine_config.forward_only:
++            qat_start = time.time()
++            self._print_init_stage("qat:start", build_start)
+             module = self._apply_qat(module)
++            self._print_init_stage("qat:done", qat_start)
+ 
+         # Synchronize all distributed processes before proceeding
++        barrier_start = time.time()
++        self._print_init_stage("pre_fsdp_barrier:start", build_start)
+         torch.distributed.barrier()
++        self._print_init_stage("pre_fsdp_barrier:done", barrier_start)
+         if self.rank == 0:
+             print_model_size(module)
+         log_gpu_memory_usage("After init model from HF AutoModel", logger=logger)
+ 
+         # Wrap model with FSDP for distributed training (sharding, mixed precision, etc.)
+         log_gpu_memory_usage("Before FSDP", logger=None)
++        self._print_init_stage("build_fsdp:start", build_start)
+         module = self._build_fsdp_module(module)
++        self._print_init_stage("build_fsdp:done", build_start)
+         log_gpu_memory_usage("After FSDP", logger=None)
+ 
+         if not self.engine_config.forward_only:
+             # Initialize optimizer with model parameters and config settings
++            optimizer_start = time.time()
++            self._print_init_stage("build_optimizer:start", build_start)
+             optimizer = self._build_optimizer(module)
++            self._print_init_stage("build_optimizer:done", optimizer_start)
+             # Create learning rate scheduler with warmup and decay settings
++            lr_scheduler_start = time.time()
++            self._print_init_stage("build_lr_scheduler:start", build_start)
+             lr_scheduler = self._build_lr_scheduler(optimizer)
++            self._print_init_stage("build_lr_scheduler:done", lr_scheduler_start)
+         else:
+             optimizer = None
+             lr_scheduler = None
+@@ -576,6 +674,7 @@ class FSDPEngine(BaseEngine):
+         self.module = module
+         self.optimizer = optimizer
+         self.lr_scheduler = lr_scheduler
++        self._print_init_stage("build_model_optimizer:done", build_start)
+ 
+     def train_mode(self, **kwargs):
+         """
+@@ -792,6 +891,8 @@ class FSDPEngine(BaseEngine):
+             offload_fsdp_optimizer(self.optimizer)
+ 
+     def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **kwargs):
++        trace_start = time.time()
++        _trace_weight_sync("get_per_tensor_param: load_fsdp_model_to_gpu start")
+         log_gpu_memory_usage("Before load_fsdp_model_to_gpu", logger=logger)
+ 
+         # FSDP2 CPUOffloadPolicy owns CPU<->GPU placement; calling model.to(device) here
+@@ -801,6 +902,7 @@ class FSDPEngine(BaseEngine):
+             load_fsdp_model_to_gpu(self.module)
+ 
+         log_gpu_memory_usage("After load_fsdp_model_to_gpu", logger=logger)
++        _trace_weight_sync(f"get_per_tensor_param: load_fsdp_model_to_gpu done: {time.time() - trace_start:.2f}s")
+ 
+         peft_config = None
+         merge_lora = self.model_config.lora.get("merge", False)
+@@ -808,42 +910,75 @@ class FSDPEngine(BaseEngine):
+         peft_model = getattr(self.module, "_fsdp_wrapped_module", self.module)
+         if hasattr(peft_model, "peft_config"):  # LoRA
+             if not merge_lora:
++                _trace_weight_sync("get_per_tensor_param: collect_lora_params start")
+                 peft_config = peft_model.peft_config.get("default", None)
+                 params = collect_lora_params(
+                     module=self.module,
+                     layered_summon=layered_summon,
+                     base_sync_done=base_sync_done,
+                 )
++                _trace_weight_sync("get_per_tensor_param: collect_lora_params done")
+                 if not base_sync_done:
+                     params = {replace_lora_wrapper(k, peft_config): v for k, v in params.items()}
+             else:  # merge lora
++                _trace_weight_sync("get_per_tensor_param: merged_lora state_dict start")
+                 with merged_lora_context(self.module, backup_adapters=True):
+                     params = self.module.state_dict()
+                     params = normalize_peft_param_name(params)
++                _trace_weight_sync("get_per_tensor_param: merged_lora state_dict done")
+         else:
++            state_dict_start = time.time()
++            _trace_weight_sync("get_per_tensor_param: module.state_dict start")
+             params = self.module.state_dict()
++            _trace_weight_sync(f"get_per_tensor_param: module.state_dict done: {time.time() - state_dict_start:.2f}s")
+ 
++        convert_start = time.time()
++        _trace_weight_sync("get_per_tensor_param: convert_weight_keys start")
+         params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
++        _trace_weight_sync(f"get_per_tensor_param: convert_weight_keys done: {time.time() - convert_start:.2f}s")
+ 
++        offload_start = time.time()
++        _trace_weight_sync("get_per_tensor_param: offload_fsdp_model_to_cpu start")
+         log_gpu_memory_usage("Before offload_fsdp_model_to_cpu", logger=logger)
+         if self._is_offload_param:
+             offload_fsdp_model_to_cpu(self.module)
+         log_gpu_memory_usage("After offload_fsdp_model_to_cpu", logger=logger)
++        _trace_weight_sync(f"get_per_tensor_param: offload_fsdp_model_to_cpu done: {time.time() - offload_start:.2f}s")
+ 
+         if peft_config is not None and base_sync_done:
+             per_tensor_param = params.items()
+         else:
+             device = get_device_id()  # used when fsdp2 set cpu_offload_policy
+-            # TODO: cast fp32 to bf16 to reduce weight sync overhead, need more fine-grained control, e.g MoE gate
+-            per_tensor_param = (
+-                (
+-                    name,
+-                    param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
+-                    if isinstance(param, DTensor)
+-                    else param,
+-                )
+-                for name, param in params.items()
+-            )
++
++            def _iter_per_tensor_param():
++                for idx, (name, param) in enumerate(params.items(), start=1):
++                    trace_this = idx <= 5 or idx % 20 == 0
++                    if trace_this:
++                        _trace_weight_sync(
++                            f"param convert start: idx={idx}, name={name}, "
++                            f"type={type(param).__name__}, device={getattr(param, 'device', None)}, "
++                            f"shape={tuple(getattr(param, 'shape', ()))}, dtype={getattr(param, 'dtype', None)}"
++                        )
++                    convert_start = time.time()
++                    if isinstance(param, DTensor):
++                        converted = param.to(device, non_blocking=True).full_tensor().to(
++                            torch.bfloat16, non_blocking=True
++                        )
++                    elif torch.is_floating_point(param):
++                        converted = param.to(device=device, dtype=torch.bfloat16, non_blocking=True)
++                    else:
++                        converted = param
++                    if trace_this:
++                        _trace_weight_sync(
++                            f"param convert done: idx={idx}, name={name}, "
++                            f"device={getattr(converted, 'device', None)}, "
++                            f"shape={tuple(getattr(converted, 'shape', ()))}, "
++                            f"dtype={getattr(converted, 'dtype', None)}, "
++                            f"time_s={time.time() - convert_start:.2f}"
++                        )
++                    yield name, converted
++
++            per_tensor_param = _iter_per_tensor_param()
+ 
+         if self._qat_enabled:
+             from verl.utils.qat.quantizer import QATQuantizer
+diff --git a/verl/workers/engine_workers.py b/verl/workers/engine_workers.py
+index bf379b49..41d844f1 100644
+--- a/verl/workers/engine_workers.py
++++ b/verl/workers/engine_workers.py
+@@ -14,6 +14,7 @@
+ import functools
+ import logging
+ import os
++import time
+ from contextlib import nullcontext
+ from copy import deepcopy
+ from functools import partial
+@@ -58,6 +59,20 @@ logger = logging.getLogger(__file__)
+ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+ 
+ 
++def _init_trace_enabled() -> bool:
++    return os.getenv("VERL_FSDP_INIT_TRACE", "0").lower() in {"1", "true", "yes", "on"}
++
++
++def _print_init_trace(message: str) -> None:
++    if _init_trace_enabled():
++        print(message, flush=True)
++
++
++def _trace_weight_sync(message: str) -> None:
++    if os.getenv("VERL_NCCL_TRACE_WEIGHTS", "0").lower() in {"1", "true", "yes", "on"}:
++        print(f"[nccl-checkpoint-trace] trainer-worker {message}", flush=True)
++
++
+ def _with_routing_replay_flag(enabled: bool):
+     """Decorator to set 'enable_routing_replay' flag on the data TensorDict."""
+ 
+@@ -85,7 +100,15 @@ class TrainingWorker(Worker, DistProfilerExtension):
+ 
+         from verl.workers.engine import BaseEngine, EngineRegistry
+ 
++        worker_init_start = time.time()
++        _print_init_trace(f"[training-worker-init] rank={self.rank} stage=start")
++        pg_start = time.time()
++        _print_init_trace(f"[training-worker-init] rank={self.rank} stage=init_process_group:start")
+         initialize_global_process_group_ray(timeout_second=None)
++        _print_init_trace(
++            f"[training-worker-init] rank={self.rank} stage=init_process_group:done "
++            f"elapsed={time.time() - pg_start:.2f}s"
++        )
+ 
+         set_numa_affinity()
+ 
+@@ -112,6 +135,12 @@ class TrainingWorker(Worker, DistProfilerExtension):
+         # TODO: this is not elegant and should refactor later
+         self.engine_config.use_remove_padding = self.model_config.get("use_remove_padding", False)
+         self.engine_config.use_fused_kernels = self.model_config.get("use_fused_kernels", False)
++        _print_init_trace(
++            f"[training-worker-init] rank={self.rank} stage=config_ready "
++            f"strategy={self.engine_config.strategy} forward_only={self.engine_config.forward_only} "
++            f"fsdp_size={getattr(self.engine_config, 'fsdp_size', None)} "
++            f"param_offload={self.engine_config.param_offload}"
++        )
+ 
+         self.profiler_config = self.config.profiler_config
+         if self.profiler_config is not None:
+@@ -124,6 +153,8 @@ class TrainingWorker(Worker, DistProfilerExtension):
+         )
+ 
+         self.model_config.model_type = self.config.model_type
++        engine_start = time.time()
++        _print_init_trace(f"[training-worker-init] rank={self.rank} stage=engine_new:start")
+         self.engine: BaseEngine = EngineRegistry.new(
+             model_type=self.config.model_type,
+             backend=self.engine_config.strategy,
+@@ -132,6 +163,10 @@ class TrainingWorker(Worker, DistProfilerExtension):
+             optimizer_config=self.optimizer_config,
+             checkpoint_config=self.checkpoint_config,
+         )
++        _print_init_trace(
++            f"[training-worker-init] rank={self.rank} stage=engine_new:done "
++            f"elapsed={time.time() - engine_start:.2f}s"
++        )
+ 
+         # build dispatch info
+         self._register_dispatch_collect_info(
+@@ -146,6 +181,10 @@ class TrainingWorker(Worker, DistProfilerExtension):
+             self.flops_counter = None
+ 
+         self.loss_fn = None
++        _print_init_trace(
++            f"[training-worker-init] rank={self.rank} stage=done "
++            f"elapsed={time.time() - worker_init_start:.2f}s"
++        )
+ 
+     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+     def to(self, device, model=True, optimizer=True, grad=True):
+@@ -695,8 +734,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
+ 
+         # 0. send_weights only for async training with disaggregated trainer and rollout
+         if effective_mode != "naive":
++            _trace_weight_sync(f"update_weights async branch start: mode={effective_mode} step={global_steps}")
++            trace_start = time.time()
++            _trace_weight_sync("get_per_tensor_param start")
+             per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
++            _trace_weight_sync(f"get_per_tensor_param done: {time.time() - trace_start:.2f}s")
++            trace_start = time.time()
++            _trace_weight_sync("checkpoint_engine.send_weights start")
+             await self.checkpoint_engine.send_weights(per_tensor_param, global_steps=global_steps)
++            _trace_weight_sync(f"checkpoint_engine.send_weights done: {time.time() - trace_start:.2f}s")
+             return
+ 
+         set_expandable_segments(False)
+diff --git a/verl/workers/rollout/vllm_rollout/vllm_async_server.py b/verl/workers/rollout/vllm_rollout/vllm_async_server.py
+index d4194e1c..75b5862f 100644
+--- a/verl/workers/rollout/vllm_rollout/vllm_async_server.py
++++ b/verl/workers/rollout/vllm_rollout/vllm_async_server.py
+@@ -26,7 +26,12 @@ from packaging import version
+ from ray.actor import ActorHandle
+ from vllm import SamplingParams
+ from vllm.engine.arg_utils import AsyncEngineArgs
+-from vllm.entrypoints.cli.serve import run_headless
++try:
++    from vllm.entrypoints.cli.serve import run_headless
++except ImportError:
++    # vllm<0.9 无 run_headless;仅多节点 headless(node_rank!=0)路径用到,
++    # 单节点 colocated 不触发 → 占位即可(QseekLLM 本地补丁,适配 vllm 0.8.5)
++    run_headless = None
+ from vllm.entrypoints.openai.api_server import build_app, init_app_state
+ from vllm.inputs import TokensPrompt
+ from vllm.lora.request import LoRARequest

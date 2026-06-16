@@ -48,6 +48,30 @@ env/
 *.pt
 *.pth
 *.ckpt
+*.parquet
+
+# Local model/tokenizer exports
+src/llmtrain/qseek_digitsplit_base/
+src/llmtrain/stage0_data_tokenizer_hf/
+
+# Post-training local artifacts
+src/post_train/.venv/
+src/post_train/checkpoints/
+src/post_train/data/
+src/post_train/logs/
+src/post_train/outputs/
+src/post_train/tensorboard_log/
+src/post_train/wandb/
+src/post_train/Compute_Cot/
+src/post_train/verl/
+src/post_train/eval/*.jsonl
+src/post_train/eval/*.jsonl.*
+src/post_train/eval/*.txt
+src/post_train/eval/_tmp_*.py
+src/post_train/docs/**/*.csv
+src/post_train/docs/**/*.json
+src/post_train/docs/**/*.jsonl
+src/post_train/docs/**/*.png
 
 # Temporary files
 tmp/
